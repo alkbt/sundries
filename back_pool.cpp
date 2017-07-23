@@ -1,3 +1,5 @@
+/* Простой пул, автоматически возвращающий отданные ресурсы */
+
 #include <iostream>
 #include <string>
 #include <memory>
