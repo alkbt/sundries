@@ -170,12 +170,12 @@ namespace StateTransion {
         }
     }
 
-    
+
     void Test()
     {
         const int testThreadsCount = 10000;
         std::cout << "StateTransition test on " << testThreadsCount << " threads\n";
-        
+
         std::vector<std::thread> threads;
         for (auto i = 0; i < testThreadsCount; ++i)
             threads.emplace_back(std::thread(StateTransionThread, !(i % 2)));
@@ -210,7 +210,7 @@ namespace ProducerConsumer {
     }
 
     void consumerWait()
-    {        
+    {
         for (;;) {
             if (ready)
                 break;
@@ -240,7 +240,7 @@ namespace ProducerConsumer {
             producerWait();
 
             data = i;
-            
+
             setDataProduced();
         }
     }
@@ -329,12 +329,12 @@ namespace ThreadSafeSingleton {
         }
     }
 
-    
+
     void Test()
     {
         const int testThreadsCount = 100;
         std::cout << "ThreadSafeSingleton test on " << testThreadsCount << " threads\n";
-        
+
         std::vector<std::thread> threads;
         for (auto i = 0; i < testThreadsCount; ++i)
             threads.emplace_back(std::thread(SingletonThread));
@@ -516,12 +516,12 @@ namespace CriticalSection {
         }
     }
 
-    
+
     void Test()
     {
         const int testThreadsCount = 10000;
         std::cout << "CriticalSection test on "<< testThreadsCount << " threads\n";
-        
+
         std::vector<std::thread> threads;
         for (auto i = 0; i < testThreadsCount; ++i)
             threads.emplace_back(std::thread(CriticalSectionThread));
@@ -574,7 +574,7 @@ namespace ReadCopyUpdate {
     class Rcu {
     public:
         Rcu():data{ new InternalData, new InternalData() }, writersLock{ 0 } {}
-        
+
         ~Rcu() {
             delete data[0];
             delete data[1];
@@ -591,9 +591,9 @@ namespace ReadCopyUpdate {
 
                 InterlockedIncrement(&currentData->readersCount);
                 if (InterlockedCompareExchange(&currentData->updatingInProgress, 0, 0) == 1) {
-                    /* 
-                     * Поток был вытеснен между получением указателя и 
-                     * инкрементом readersCount, а проснулся когда писатель 
+                    /*
+                     * Поток был вытеснен между получением указателя и
+                     * инкрементом readersCount, а проснулся когда писатель
                      * начал обновлять данные
                      */
                     InterlockedDecrement(&currentData->readersCount);
@@ -627,10 +627,10 @@ namespace ReadCopyUpdate {
 
             newData->data = value;
             InterlockedExchange(&newData->updatingInProgress, 0);
-            
+
             setCopy(data[0]);
             setCurrentData(newData);
-            
+
             InterlockedExchange(&writersLock, 0);
         }
     private:
@@ -686,7 +686,7 @@ namespace ReadCopyUpdate {
         for (unsigned long long i = 0; i < 1000; ++i) {
             Data data = rcu.get();
             if (data.a + data.b != data.c)
-                std::cout << "Rcu is broken!\n";        
+                std::cout << "Rcu is broken!\n";
         }
     }
 
@@ -765,7 +765,7 @@ namespace ReadersWriterLock {
             for (;;) {
                 LockState oldLockState;
                 oldLockState.raw = InterlockedCompareExchange(&lockState.raw, 0, 0);
-                
+
                 LockState newLockState = oldLockState;
                 --newLockState.readersCount;
 
@@ -781,7 +781,7 @@ namespace ReadersWriterLock {
         void exclusiveLock() {
             LockState oldLockState;
             oldLockState.raw = 0;
-            
+
             LockState newLockState;
             newLockState.writerLock = 1;
             newLockState.readersCount = 0;
@@ -856,7 +856,7 @@ namespace ReadersWriterLock {
         lock.exclusiveUnlock();
     }
 
-    void Test() 
+    void Test()
     {
         const int testThreadsCount = 10000;
         std::cout << "ReadersWriterLock test on " << testThreadsCount << " threads\n";
@@ -1019,11 +1019,11 @@ namespace ReferenceCounter {
         }
     }
 
-    void Test() 
+    void Test()
     {
         const int testThreadsCount = 10000;
         std::cout << "ReferenceCounter test on " << testThreadsCount << " threads\n";
-        
+
         std::vector<std::thread> threads;
         for (auto i = 0; i < testThreadsCount; ++i)
             threads.emplace_back(std::thread(ReferenceCounterThread));
