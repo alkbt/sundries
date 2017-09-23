@@ -115,20 +115,22 @@ namespace StateTransion {
         volatile DWORD OwnerThreadId;
 
         void AdvanceState(LONG From, LONG To) {
-            for (;;) {
-                if (InterlockedCompareExchange(&State, To, From) == From)
-                    break;
-
+            while (InterlockedCompareExchange(&State, To, From) != From)
                 Sleep(20);
-            }
 
             OwnerThreadId = GetCurrentThreadId();
             MemoryBarrier();
         }
 
         void SetState(LONG to) {
-            InterlockedExchange(&OwnerThreadId, 0);
-            InterlockedExchange(&State, to);
+            OwnerThreadId = 0;
+            /*
+             * OwnerThreadId должен быть гарантированно сброшен до изменения
+             * State. Запрещаем компилятору изменять порядок записи.
+             */
+            MemoryBarrier();
+            State = to;
+            MemoryBarrier();
         }
     };
 
@@ -199,38 +201,26 @@ namespace ProducerConsumer {
 
     void producerWait()
     {
-        for (;;) {
-            if (!ready)
-                break;
-
+        while (ready)
             Sleep(20);
-        }
-
-        MemoryBarrier();
     }
 
     void consumerWait()
     {
-        for (;;) {
-            if (ready)
-                break;
-
+        while (!ready)
             Sleep(20);
-        }
-
-        MemoryBarrier();
     }
 
     void setDataProduced()
     {
-        MemoryBarrier();
         ready = true;
+        MemoryBarrier();
     }
 
     void setDataConsumed()
     {
-        MemoryBarrier();
         ready = false;
+        MemoryBarrier();
     }
 
     const int iterationsCount = 1000;
@@ -304,17 +294,14 @@ namespace ThreadSafeSingleton {
             static volatile LONG createLock = 0;
 
             if (!object) {
-                for (;;) {
-                    if (!InterlockedCompareExchange(&createLock, 1, 0))
-                        break;
-
+                while (InterlockedCompareExchange(&createLock, 1, 0))
                     Sleep(20);
-                }
 
                 if (!object)
                     object = new T();
 
-                InterlockedExchange(&createLock, 0);
+                createLock = 0;
+                MemoryBarrier();
             }
 
             return const_cast<T *>(object);
@@ -443,7 +430,9 @@ namespace CriticalSection {
                 return;
 
             if (!InterlockedDecrement(&refCount)) {
-                InterlockedExchange(&ownerThreadId, 0);
+                ownerThreadId = 0;
+                MemoryBarrier();
+
                 SetEvent(event);
             }
         }
@@ -460,7 +449,12 @@ namespace CriticalSection {
 
         bool tryLockFreeSection(DWORD threadId) {
             if (!InterlockedCompareExchange(&ownerThreadId, threadId, 0)) {
-                InterlockedExchange(&refCount, 1);
+                if (refCount)
+                    throw std::exception("CriticalSection is broken!");
+
+                refCount = 1;
+                MemoryBarrier();
+
                 return true;
             }
 
@@ -590,7 +584,7 @@ namespace ReadCopyUpdate {
                 InternalData * currentData = getCurrentData();
 
                 InterlockedIncrement(&currentData->readersCount);
-                if (InterlockedCompareExchange(&currentData->updatingInProgress, 0, 0) == 1) {
+                if (currentData->updatingInProgress) {
                     /*
                      * Поток был вытеснен между получением указателя и
                      * инкрементом readersCount, а проснулся когда писатель
@@ -609,29 +603,27 @@ namespace ReadCopyUpdate {
 
         void set(const T& value)
         {
-            for (;;) {
-                if (!InterlockedCompareExchange(&writersLock, 1, 0))
-                    break;
-
+            while (InterlockedCompareExchange(&writersLock, 1, 0))
                 Sleep(20);
-            }
 
             InternalData * newData = getCopy();
-            InterlockedExchange(&newData->updatingInProgress, 1);
-            for (;;) {
-                if (!InterlockedCompareExchange(&newData->readersCount, 0, 0))
-                    break;
 
+            newData->updatingInProgress = 1;
+            MemoryBarrier();
+
+            while (newData->readersCount)
                 Sleep(20);
-            }
 
             newData->data = value;
-            InterlockedExchange(&newData->updatingInProgress, 0);
+
+            newData->updatingInProgress = 0;
+            MemoryBarrier();
 
             setCopy(data[0]);
             setCurrentData(newData);
 
-            InterlockedExchange(&writersLock, 0);
+            writersLock = 0;
+            MemoryBarrier();
         }
     private:
         struct InternalData {
@@ -643,24 +635,24 @@ namespace ReadCopyUpdate {
             volatile LONG updatingInProgress;
         };
 
-       volatile InternalData * data[2];
+       InternalData * volatile data[2];
 
        InternalData * getCurrentData() {
-           return (InternalData *)InterlockedCompareExchangePointer(
-                        (volatile PVOID *)&data[0], nullptr, nullptr);
+           return data[0];
        }
 
        void setCurrentData(InternalData * newData) {
-           InterlockedExchangePointer((volatile PVOID *)&data[0], newData);
+           data[0] = newData;
+           MemoryBarrier();
        }
 
        InternalData * getCopy() {
-           return (InternalData *)InterlockedCompareExchangePointer(
-                        (volatile PVOID *)&data[1], nullptr, nullptr);
+           return data[1];
        }
 
        void setCopy(volatile InternalData * newData) {
-           InterlockedExchangePointer((volatile PVOID *)&data[1], (PVOID)newData);
+           data[1] = newData;
+           MemoryBarrier();
        }
 
        volatile LONG writersLock;
@@ -742,9 +734,7 @@ namespace ReadersWriterLock {
 
         void sharedLock() {
             for (;;) {
-                LockState oldLockState;
-                oldLockState.raw = InterlockedCompareExchange(&lockState.raw, 0, 0);
-
+                LockState oldLockState = lockState;
                 if (oldLockState.writerLock) {
                     Sleep(20);
                     continue;
@@ -763,8 +753,10 @@ namespace ReadersWriterLock {
 
         void sharedUnlock() {
             for (;;) {
-                LockState oldLockState;
-                oldLockState.raw = InterlockedCompareExchange(&lockState.raw, 0, 0);
+                LockState oldLockState = lockState;
+
+                if (oldLockState.writerLock)
+                    throw std::exception("RwLock is broken!\n");
 
                 LockState newLockState = oldLockState;
                 --newLockState.readersCount;
@@ -797,16 +789,11 @@ namespace ReadersWriterLock {
         }
 
         void exclusiveUnlock() {
-            LockState oldLockState;
-            oldLockState.raw = InterlockedCompareExchange(&lockState.raw, 0, 0);
-
-            if (oldLockState.readersCount || (!oldLockState.writerLock))
+            if (lockState.readersCount || !lockState.writerLock)
                 throw std::exception("RwMutex in broken!\n");
 
-            LockState newLockState;
-            newLockState.raw = 0;
-
-            InterlockedExchange(&lockState.raw, newLockState.raw);
+            lockState.raw = 0;
+            MemoryBarrier();
         }
     private:
         union LockState {
@@ -832,28 +819,36 @@ namespace ReadersWriterLock {
     {
         Sleep(getRandom(0, 1500));
 
-        lock.sharedLock();
+        try {
+            lock.sharedLock();
 
-        if (data.a + data.b != data.c)
-            std::cout << "RwLock is broken!\n";
+            if (data.a + data.b != data.c)
+                throw std::exception("RwLock is broken!\n");
 
-        lock.sharedUnlock();
+            lock.sharedUnlock();
+        } catch (std::exception e) {
+            std::cout << e.what() << std::endl;
+        }
     }
 
     void WriterLockThread()
     {
         Sleep(getRandom(0, 500));
 
-        lock.exclusiveLock();
+        try {
+            lock.exclusiveLock();
 
-        static int a = 0;
-        static int b = 0;
+            static int a = 0;
+            static int b = 0;
 
-        data.a = ++a;
-        data.b = --b;
-        data.c = data.a + data.b;
+            data.a = ++a;
+            data.b = --b;
+            data.c = data.a + data.b;
 
-        lock.exclusiveUnlock();
+            lock.exclusiveUnlock();
+        } catch (std::exception e) {
+            std::cout << e.what() << std::endl;
+        }
     }
 
     void Test()
@@ -955,8 +950,7 @@ namespace ReferenceCounter {
     {
         InterlockedIncrement(&acquiresCount);
 
-        DataObject * object = (DataObject *)InterlockedCompareExchangePointer(
-            (volatile PVOID *)&g_DataObject, nullptr, nullptr);
+        DataObject * object = g_DataObject;
         if (object)
             InterlockedIncrement(&object->refCount);
 
@@ -981,12 +975,8 @@ namespace ReferenceCounter {
         if (!oldObject)
             return;
 
-        for (;;) {
-            if (!InterlockedCompareExchange(&acquiresCount, 0, 0))
-                break;
-
+        while (acquiresCount)
             Sleep(10);
-        }
 
         release(oldObject);
     }
