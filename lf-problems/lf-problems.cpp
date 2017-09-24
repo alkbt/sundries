@@ -969,9 +969,12 @@ namespace ReferenceCounter {
 
     void setNew(DataObject * newObject)
     {
-        newObject->refCount = 1;
+        if (newObject)
+            newObject->refCount = 1;
+
         DataObject * oldObject = (DataObject *)InterlockedExchangePointer(
             (volatile PVOID *)&g_DataObject, newObject);
+
         if (!oldObject)
             return;
 
@@ -987,9 +990,14 @@ namespace ReferenceCounter {
 
         if (getRandom(0, 10) < 6) {
             /* Writer*/
-            DataObject * object = new DataObject();
-            object->data = getRandom(0, 500);
-            setNew(object);
+            if (getRandom(0, 10) < 3) {
+                setNew(nullptr);
+            }  else {
+                DataObject * object = new DataObject();
+                object->data = getRandom(0, 500);
+                setNew(object);
+            }
+
         } else {
             /* Reader */
             DataObject * object = acquire();
@@ -1020,6 +1028,8 @@ namespace ReferenceCounter {
 
         for (auto& thread : threads)
             thread.join();
+
+        setNew(nullptr);
     }
 }
 
@@ -1067,8 +1077,8 @@ namespace ReferernceCounterDoubleWordCas {
     };
 
     struct Base {
-        uintptr_t refCounter;
-        uintptr_t ptr;
+        volatile uintptr_t refCounter;
+        volatile uintptr_t ptr;
     };
 
     volatile Base * g_ptr = nullptr;
@@ -1105,7 +1115,9 @@ namespace ReferernceCounterDoubleWordCas {
 
     void set(Data * object)
     {
-        object->refCounter = 0;
+        if (object)
+            object->refCounter = 0;
+
         Base * newBase = new Base{ 0, reinterpret_cast<uintptr_t>(object) };
 
         Base * oldBase = reinterpret_cast<Base *>(InterlockedExchangePointer(
@@ -1116,15 +1128,13 @@ namespace ReferernceCounterDoubleWordCas {
             return;
 
         Data * oldObject = reinterpret_cast<Data *>(oldBase->ptr);
+        if (oldObject) {
+            while (oldBase->refCounter + oldObject->refCounter)
+                Sleep(20);
 
-        for (;;) {
-            if (!(oldBase->refCounter + oldObject->refCounter))
-                break;
-
-            Sleep(20);
+            delete oldObject;
         }
 
-        delete oldObject;
         delete oldBase;
     }
 
@@ -1135,7 +1145,10 @@ namespace ReferernceCounterDoubleWordCas {
         static int a = 0;
         static int b = 0;
 
-        set(new Data{ ++a, --b, a + b });
+        if (getRandom(0, 10) < 3)
+            set(nullptr);
+        else
+            set(new Data{ ++a, --b, a + b });
     }
 
     void readerThread()
@@ -1169,6 +1182,8 @@ namespace ReferernceCounterDoubleWordCas {
 
         for (auto& thread : threads)
             thread.join();
+
+        set(nullptr);
     }
 }
 
