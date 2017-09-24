@@ -203,12 +203,18 @@ namespace ProducerConsumer {
     {
         while (ready)
             Sleep(20);
+
+        /* На случай если используется Weakly-ordered модель памяти */
+        MemoryBarrier();
     }
 
     void consumerWait()
     {
         while (!ready)
             Sleep(20);
+
+        /* На случай если используется Weakly-ordered модель памяти */
+        MemoryBarrier();
     }
 
     void setDataProduced()
@@ -300,8 +306,13 @@ namespace ThreadSafeSingleton {
                 if (!object)
                     object = new T();
 
-                createLock = 0;
-                MemoryBarrier();
+                /*
+                 * Interlocked операция работает, как барьер памяти между
+                 * присвоением указателя на объект и сбросом createLock, что
+                 * предотвратит перестановку записей компилятором или при
+                 * работе с Weakly-ordered моделью памяти
+                 */
+                InterlockedExchange(&createLock, 0);
             }
 
             return const_cast<T *>(object);
@@ -607,23 +618,21 @@ namespace ReadCopyUpdate {
                 Sleep(20);
 
             InternalData * newData = getCopy();
-
-            newData->updatingInProgress = 1;
-            MemoryBarrier();
+            InterlockedExchange(&newData->updatingInProgress, 1);
 
             while (newData->readersCount)
                 Sleep(20);
 
+            MemoryBarrier();
+
             newData->data = value;
 
-            newData->updatingInProgress = 0;
-            MemoryBarrier();
+            InterlockedExchange(&newData->updatingInProgress, 0);
 
-            setCopy(data[0]);
+            setCopy(getCurrentData());
             setCurrentData(newData);
 
-            writersLock = 0;
-            MemoryBarrier();
+            InterlockedExchange(&writersLock, 0);
         }
     private:
         struct InternalData {
@@ -740,6 +749,8 @@ namespace ReadersWriterLock {
                     continue;
                 }
 
+                MemoryBarrier();
+
                 LockState newLockState = oldLockState;
                 ++newLockState.readersCount;
 
@@ -778,14 +789,9 @@ namespace ReadersWriterLock {
             newLockState.writerLock = 1;
             newLockState.readersCount = 0;
 
-            for (;;) {
-                if (InterlockedCompareExchange(&lockState.raw,
-                                               newLockState.raw, oldLockState.raw)
-                                               == oldLockState.raw)
-                    break;
-
+            while (InterlockedCompareExchange(&lockState.raw, newLockState.raw,
+                                              oldLockState.raw) != oldLockState.raw)
                 Sleep(20);
-            }
         }
 
         void exclusiveUnlock() {
@@ -980,6 +986,8 @@ namespace ReferenceCounter {
 
         while (acquiresCount)
             Sleep(10);
+
+        MemoryBarrier();
 
         release(oldObject);
     }
