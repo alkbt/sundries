@@ -22,6 +22,71 @@ int getRandom(int from, int to)
     return uni(rng);
 }
 
+class AdaptiveWait
+{
+public:
+    AdaptiveWait(): waiting_state{0} {}
+
+    AdaptiveWait(const AdaptiveWait&) = delete;
+    AdaptiveWait(AdaptiveWait&&) = delete;
+    AdaptiveWait& operator=(const AdaptiveWait&) = delete;
+    AdaptiveWait& operator=(AdaptiveWait&&) = delete;
+
+    void wait() {
+        if (waiting_state < 30)
+            _mm_pause();
+        else if (waiting_state < 25)
+            SwitchToThread();
+        else
+            Sleep(10);
+
+        ++waiting_state;
+    }
+private:
+    int waiting_state;
+};
+
+class SpinLock
+{
+public:
+    SpinLock():spinLock{0} {}
+
+    SpinLock(const SpinLock&) = delete;
+    SpinLock(SpinLock&&) = delete;
+    SpinLock& operator=(const SpinLock&) = delete;
+    SpinLock& operator=(SpinLock&&) = delete;
+
+    void lock() {
+        AdaptiveWait adaptiveWait;
+        while (InterlockedCompareExchange(&spinLock, 1, 0))
+            adaptiveWait.wait();
+    }
+
+    void unlock() {
+        InterlockedExchange(&spinLock, 0);
+    }
+private:
+    volatile LONG spinLock;
+};
+
+class AutoSpinLock
+{
+public:
+    AutoSpinLock(SpinLock& spinLock):spinLock{spinLock} {
+        spinLock.lock();
+    }
+    ~AutoSpinLock() {
+        spinLock.unlock();
+    }
+
+    AutoSpinLock(const AutoSpinLock&) = delete;
+    AutoSpinLock(AutoSpinLock&&) = delete;
+    AutoSpinLock& operator=(const AutoSpinLock&) = delete;
+    AutoSpinLock& operator=(const AutoSpinLock&&) = delete;
+private:
+    SpinLock& spinLock;
+};
+
 /*
 Простые задачки по lock-free и параллельным алгоритмам.
 */
@@ -69,25 +134,22 @@ namespace StateTransion {
 
     class StateTransion {
     public:
-        StateTransion():State{ NoData }, OwnerThreadId{ 0 } {}
+        StateTransion():State{ NoData } {}
 
         StateTransion(const StateTransion&) = delete;
         StateTransion(StateTransion&&) = delete;
         StateTransion& operator=(const StateTransion&) = delete;
         StateTransion& operator=(StateTransion&&) = delete;
 
-        void AcquireForWrite() {
-            AdvanceState(NoData, ProducingData);
+        bool AcquireForWrite() {
+            return tryAdvanceState(NoData, ProducingData);
         }
 
-        void AcquireForRead() {
-            AdvanceState(DataReady, ConsumingData);
+        bool AcquireForRead() {
+            return tryAdvanceState(DataReady, ConsumingData);
         }
 
         void Release() {
-            if (GetCurrentThreadId() != OwnerThreadId)
-                return;
-
             switch (State) {
             case ProducingData:
                 SetState(DataReady);
@@ -108,27 +170,11 @@ namespace StateTransion {
 
         volatile LONG State;
 
-        /*
-         * Идентификатор потока используется для
-         * предотвращения злоупотреблением Release
-         */
-        volatile DWORD OwnerThreadId;
-
-        void AdvanceState(LONG From, LONG To) {
-            while (InterlockedCompareExchange(&State, To, From) != From)
-                Sleep(20);
-
-            OwnerThreadId = GetCurrentThreadId();
-            MemoryBarrier();
+        bool tryAdvanceState(LONG From, LONG To) {
+            return InterlockedCompareExchange(&State, To, From) == From;
         }
 
         void SetState(LONG to) {
-            OwnerThreadId = 0;
-            /*
-             * OwnerThreadId должен быть гарантированно сброшен до изменения
-             * State. Запрещаем компилятору изменять порядок записи.
-             */
-            MemoryBarrier();
             State = to;
             MemoryBarrier();
         }
@@ -144,7 +190,8 @@ namespace StateTransion {
 
         if (reader) {
             /* Reader */
-            state.AcquireForRead();
+            if (!state.AcquireForRead())
+                return;
 
             int checkSum = 0;
             for (const auto x : data) {
@@ -157,7 +204,8 @@ namespace StateTransion {
             state.Release();
         } else {
             /* Writer */
-            state.AcquireForWrite();
+            if (!state.AcquireForWrite())
+                return;
 
             auto dataSize = getRandom(0, 50);
             data.clear();
@@ -201,20 +249,20 @@ namespace ProducerConsumer {
 
     void producerWait()
     {
-        while (ready)
-            Sleep(20);
-
-        /* На случай если используется Weakly-ordered модель памяти */
-        MemoryBarrier();
+        for (;;) {
+            AdaptiveWait adaptiveWait;
+            if (ready)
+                adaptiveWait.wait();
+        }
     }
 
     void consumerWait()
     {
-        while (!ready)
-            Sleep(20);
-
-        /* На случай если используется Weakly-ordered модель памяти */
-        MemoryBarrier();
+        for (;;) {
+            AdaptiveWait adaptiveWait;
+            if (!ready)
+                adaptiveWait.wait();
+        }
     }
 
     void setDataProduced()
@@ -297,22 +345,17 @@ namespace ThreadSafeSingleton {
 
         static T * getInstance() {
             static volatile T * object = nullptr;
-            static volatile LONG createLock = 0;
+            static SpinLock creatorsLock;
 
             if (!object) {
-                while (InterlockedCompareExchange(&createLock, 1, 0))
-                    Sleep(20);
+                AutoSpinLock lock(creatorsLock);
 
-                if (!object)
-                    object = new T();
-
-                /*
-                 * Interlocked операция работает, как барьер памяти между
-                 * присвоением указателя на объект и сбросом createLock, что
-                 * предотвратит перестановку записей компилятором или при
-                 * работе с Weakly-ordered моделью памяти
-                 */
-                InterlockedExchange(&createLock, 0);
+                if (!object) {
+                    T * newObject = new T();
+                    _ReadWriteBarrier();
+                    object = newObject;
+                    MemoryBarrier();
+                }
             }
 
             return const_cast<T *>(object);
@@ -460,9 +503,6 @@ namespace CriticalSection {
 
         bool tryLockFreeSection(DWORD threadId) {
             if (!InterlockedCompareExchange(&ownerThreadId, threadId, 0)) {
-                if (refCount)
-                    throw std::exception("CriticalSection is broken!");
-
                 refCount = 1;
                 MemoryBarrier();
 
@@ -984,10 +1024,11 @@ namespace ReferenceCounter {
         if (!oldObject)
             return;
 
-        while (acquiresCount)
-            Sleep(10);
-
-        MemoryBarrier();
+        if(acquiresCount) {
+            AdaptiveWait adaptiveWait;
+            while (acquiresCount)
+                adaptiveWait.wait();
+        }
 
         release(oldObject);
     }
@@ -1029,6 +1070,135 @@ namespace ReferenceCounter {
     {
         const int testThreadsCount = 10000;
         std::cout << "ReferenceCounter test on " << testThreadsCount << " threads\n";
+
+        std::vector<std::thread> threads;
+        for (auto i = 0; i < testThreadsCount; ++i)
+            threads.emplace_back(std::thread(ReferenceCounterThread));
+
+        for (auto& thread : threads)
+            thread.join();
+
+        setNew(nullptr);
+    }
+}
+
+namespace WritersBlockingReferenceCounter {
+    struct DataObject {
+        volatile int data;
+
+        volatile LONG refCount;
+    };
+
+    DataObject * g_DataObject = nullptr;
+    volatile LONG * acquiresCount = nullptr;
+    SpinLock writerSpinLock;
+
+    DataObject * acquire()
+    {
+        LONG * localAcquiresCount = const_cast<LONG *>(acquiresCount);
+
+        if (!localAcquiresCount)
+            return nullptr;
+
+        InterlockedIncrement(localAcquiresCount);
+
+        DataObject * object = g_DataObject;
+        if (object)
+            InterlockedIncrement(&object->refCount);
+
+        InterlockedDecrement(localAcquiresCount);
+        return object;
+    }
+
+    void release(DataObject * object)
+    {
+        if (!object)
+            return;
+
+        if (!InterlockedDecrement(&object->refCount))
+            delete object;
+    }
+
+    void setNew(DataObject * newObject)
+    {
+        if (newObject)
+            newObject->refCount = 1;
+
+        DataObject * oldObject;
+
+
+        {
+            AutoSpinLock lock(writerSpinLock);
+
+            oldObject = (DataObject *)InterlockedExchangePointer(
+                                (volatile PVOID *)&g_DataObject, newObject);
+
+            /*
+             * С этого момента acquiresCount начинают инкрементировать читатели
+             * нового объекта.
+             */
+
+            LONG * newAcquiresCount = new LONG{0};
+            LONG * oldAcquiresCount = reinterpret_cast<LONG *>(InterlockedExchangePointer(
+                                    (volatile PVOID *)&acquiresCount, newAcquiresCount));
+
+
+            /*
+             * Часть читателей нового объекта будут работать с oldAcquiresCount.
+             * Для того, что бы следующий писатель не удалил объект до
+             * того как все читатели нового объекта закончат делать acquire,
+             * блокируем нового писателя до момента пока oldAcquiresCount не
+             * станет равным 0.
+             */
+            if (oldAcquiresCount) {
+                AdaptiveWait adaptiveWait;
+                while (*oldAcquiresCount)
+                    adaptiveWait.wait();
+            }
+
+        }
+
+        if (oldObject)
+            release(oldObject);
+    }
+
+    void ReferenceCounterThread()
+    {
+        Sleep(getRandom(0, 100));
+
+        if (getRandom(0, 10) < 6) {
+            /* Writer*/
+            if (getRandom(0, 10) < 3) {
+                setNew(nullptr);
+            } else {
+                DataObject * object = new DataObject();
+                object->data = getRandom(0, 500);
+                setNew(object);
+            }
+
+        } else {
+            /* Reader */
+            DataObject * object = acquire();
+            if (!object)
+                return;
+
+            int data = object->data;
+            int iterationsCount = getRandom(0, 100);
+            for (int i = 0; i < iterationsCount; ++i) {
+                if (object->data != data) {
+                    std::cout << "ReferenceCounter is broken!\n";
+                    return;
+                }
+
+                Sleep(10);
+            }
+        }
+    }
+
+    void Test()
+    {
+        const int testThreadsCount = 10000;
+        std::cout << "WritersBlockingReferenceCounter test on " << testThreadsCount << " threads\n";
 
         std::vector<std::thread> threads;
         for (auto i = 0; i < testThreadsCount; ++i)
@@ -1224,6 +1394,7 @@ int main()
     ReadCopyUpdate::Test();
     ReadersWriterLock::Test();
     ReferenceCounter::Test();
+    WritersBlockingReferenceCounter::Test();
     ReferernceCounterDoubleWordCas::Test();
 
     return 0;
