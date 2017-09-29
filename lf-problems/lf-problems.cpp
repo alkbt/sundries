@@ -32,7 +32,7 @@ public:
     AdaptiveWait& operator=(const AdaptiveWait&) = delete;
     AdaptiveWait& operator=(AdaptiveWait&&) = delete;
 
-    void wait() {
+    void operator()() {
         if (waiting_state < 30)
             _mm_pause();
         else if (waiting_state < 25)
@@ -59,7 +59,7 @@ public:
     void lock() {
         AdaptiveWait adaptiveWait;
         while (InterlockedCompareExchange(&spinLock, 1, 0))
-            adaptiveWait.wait();
+            adaptiveWait();
     }
 
     void unlock() {
@@ -252,7 +252,7 @@ namespace ProducerConsumer {
         for (;;) {
             AdaptiveWait adaptiveWait;
             if (ready)
-                adaptiveWait.wait();
+                adaptiveWait();
         }
     }
 
@@ -261,7 +261,7 @@ namespace ProducerConsumer {
         for (;;) {
             AdaptiveWait adaptiveWait;
             if (!ready)
-                adaptiveWait.wait();
+                adaptiveWait();
         }
     }
 
@@ -1027,7 +1027,7 @@ namespace ReferenceCounter {
         if(acquiresCount) {
             AdaptiveWait adaptiveWait;
             while (acquiresCount)
-                adaptiveWait.wait();
+                adaptiveWait();
         }
 
         release(oldObject);
@@ -1251,10 +1251,6 @@ https://www.amazon.com/C-Concurrency-Action-Practical-Multithreading/dp/19339887
 http://www.1024cores.net/
 
 */
-
-class MassiveThreads {
-public:
-};
 
 int main()
 {
