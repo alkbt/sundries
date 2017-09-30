@@ -1,17 +1,16 @@
 ﻿// lf-problems.cpp : Defines the entry point for the console application.
 //
-
-#include "stdafx.h"
-
-#include <exception>
+#include <thread>
+#include <atomic>
+#include <chrono>
 #include <iostream>
 #include <vector>
-#include <thread>
 #include <string>
-#include <sstream>
 #include <random>
-#include <cstdlib>
-#include <Windows.h>
+
+#include <emmintrin.h>
+
+using namespace std;
 
 int getRandom(int from, int to)
 {
@@ -25,7 +24,7 @@ int getRandom(int from, int to)
 class AdaptiveWait
 {
 public:
-    AdaptiveWait(): waiting_state{0} {}
+    AdaptiveWait(int theresold = 50): waiting_state{0}, theresold{theresold} {}
 
     AdaptiveWait(const AdaptiveWait&) = delete;
     AdaptiveWait(AdaptiveWait&&) = delete;
@@ -33,23 +32,22 @@ public:
     AdaptiveWait& operator=(AdaptiveWait&&) = delete;
 
     void operator()() {
-        if (waiting_state < 30)
+        if (waiting_state < theresold)
             _mm_pause();
-        else if (waiting_state < 25)
-            SwitchToThread();
         else
-            Sleep(10);
+            this_thread::sleep_for(chrono::milliseconds(10));
 
         ++waiting_state;
     }
 private:
+    int theresold;
     int waiting_state;
 };
 
 class SpinLock
 {
 public:
-    SpinLock():spinLock{0} {}
+    SpinLock():spinLock{false} {}
 
     SpinLock(const SpinLock&) = delete;
     SpinLock(SpinLock&&) = delete;
@@ -58,15 +56,21 @@ public:
 
     void lock() {
         AdaptiveWait adaptiveWait;
-        while (InterlockedCompareExchange(&spinLock, 1, 0))
+        bool expected;
+        for (;;) {
+            expected = false;
+            if (spinLock.compare_exchange_weak(expected, true, memory_order_acq_rel))
+                break;
+
             adaptiveWait();
+        }
     }
 
     void unlock() {
-        InterlockedExchange(&spinLock, 0);
+        spinLock.store(false, memory_order_release);
     }
 private:
-    volatile LONG spinLock;
+    atomic<bool> spinLock;
 };
 
 class AutoSpinLock
@@ -134,7 +138,7 @@ namespace StateTransion {
 
     class StateTransion {
     public:
-        StateTransion():State{ NoData } {}
+        StateTransion(): state{ NoData } {}
 
         StateTransion(const StateTransion&) = delete;
         StateTransion(StateTransion&&) = delete;
@@ -150,7 +154,7 @@ namespace StateTransion {
         }
 
         void Release() {
-            switch (State) {
+            switch (state.load(memory_order_acquire)) {
             case ProducingData:
                 SetState(DataReady);
                 break;
@@ -158,25 +162,24 @@ namespace StateTransion {
                 SetState(NoData);
                 break;
             default:
-                throw std::exception("StateTransion object is broken!");
+                break;
             }
 
         }
     private:
-        static const LONG NoData = 0;
-        static const LONG ProducingData = 1;
-        static const LONG DataReady = 2;
-        static const LONG ConsumingData = 3;
+        static const long NoData        = 0;
+        static const long ProducingData = 1;
+        static const long DataReady     = 2;
+        static const long ConsumingData = 3;
 
-        volatile LONG State;
+        atomic<long> state;
 
-        bool tryAdvanceState(LONG From, LONG To) {
-            return InterlockedCompareExchange(&State, To, From) == From;
+        bool tryAdvanceState(long From, long To) {
+            return state.compare_exchange_strong(From, To, memory_order_acq_rel);
         }
 
-        void SetState(LONG to) {
-            State = to;
-            MemoryBarrier();
+        void SetState(long to) {
+            state.store(memory_order_release);
         }
     };
 
@@ -184,51 +187,55 @@ namespace StateTransion {
     std::vector<int> data;
     int checkSum = 0;
 
-    void StateTransionThread(bool reader)
+    const int testThreadsCount = 50;
+    const int iterationsCount = 1000;
+
+    void reader()
     {
-        Sleep(getRandom(0, 100));
+        this_thread::sleep_for(chrono::milliseconds(getRandom(0, 100)));
 
-        if (reader) {
-            /* Reader */
+        for (auto i = 0; i < iterationsCount; ++i) {
             if (!state.AcquireForRead())
-                return;
+                continue;
 
-            int checkSum = 0;
+            int l_checkSum = 0;
             for (const auto x : data) {
-                checkSum += x;
+                l_checkSum += x;
             }
 
-            if (checkSum != checkSum)
+            if (l_checkSum != checkSum)
                 std::cout << "StateTransion object is broken!\n";
-
-            state.Release();
-        } else {
-            /* Writer */
-            if (!state.AcquireForWrite())
-                return;
-
-            auto dataSize = getRandom(0, 50);
-            data.clear();
-            checkSum = 0;
-            for (auto i = 0; i < dataSize; ++i) {
-                int x = getRandom(0, 100);
-                checkSum += x;
-                data.push_back(x);
-            }
 
             state.Release();
         }
     }
 
+    void writer()
+    {
+        this_thread::sleep_for(chrono::milliseconds(getRandom(0, 100)));
+
+        if (!state.AcquireForWrite())
+            return;
+
+        auto dataSize = getRandom(0, 50);
+        data.clear();
+        checkSum = 0;
+        for (auto i = 0; i < dataSize; ++i) {
+            int x = getRandom(0, 100);
+            checkSum += x;
+            data.push_back(x);
+        }
+
+        state.Release();
+    }
 
     void Test()
     {
-        const int testThreadsCount = 10000;
         std::cout << "StateTransition test on " << testThreadsCount << " threads\n";
 
         std::vector<std::thread> threads;
         for (auto i = 0; i < testThreadsCount; ++i)
-            threads.emplace_back(std::thread(StateTransionThread, !(i % 2)));
+            threads.emplace_back(std::thread(i % 2 ? reader : writer));
 
         for (auto& thread : threads)
             thread.join();
@@ -244,40 +251,34 @@ namespace StateTransion {
 */
 
 namespace ProducerConsumer {
-    volatile bool ready = false;
+    atomic<bool> ready{false};
     int data = 0;
 
     void producerWait()
     {
-        for (;;) {
-            AdaptiveWait adaptiveWait;
-            if (ready)
+        AdaptiveWait adaptiveWait;
+        while (ready.load(memory_order_acquire))
                 adaptiveWait();
-        }
     }
 
     void consumerWait()
     {
-        for (;;) {
-            AdaptiveWait adaptiveWait;
-            if (!ready)
+        AdaptiveWait adaptiveWait;
+        while (!ready.load(memory_order_acquire))
                 adaptiveWait();
-        }
     }
 
     void setDataProduced()
     {
-        ready = true;
-        MemoryBarrier();
+        ready.store(true, memory_order_release);
     }
 
     void setDataConsumed()
     {
-        ready = false;
-        MemoryBarrier();
+        ready.store(false, memory_order_release);
     }
 
-    const int iterationsCount = 1000;
+    const int iterationsCount = 100;
     void ProducerThread()
     {
         for (auto i = 0; i < iterationsCount; ++i) {
@@ -328,44 +329,51 @@ namespace ThreadSafeSingleton {
     public:
 
         TestObject() {
-            InterlockedIncrement(&creationCounter);
+            creationCounter.fetch_add(1, memory_order_acq_rel);
         }
 
-        LONG getCreationCounter() {
-            return creationCounter;
+        long getCreationCounter() {
+            return creationCounter.load(memory_order_acquire);
         }
     private:
-        static volatile LONG creationCounter;
+        static atomic<long> creationCounter;
     };
-    volatile LONG TestObject::creationCounter = 0;
 
-    template <typename T>
+    atomic<long> TestObject::creationCounter{0};
+
+    template<typename T>
     struct Singleton {
         Singleton() = delete;
 
         static T * getInstance() {
-            static volatile T * object = nullptr;
-            static SpinLock creatorsLock;
 
-            if (!object) {
+            if (!object.load(memory_order_relaxed)) {
                 AutoSpinLock lock(creatorsLock);
 
-                if (!object) {
+                if (!object.load(memory_order_relaxed)) {
                     T * newObject = new T();
-                    _ReadWriteBarrier();
-                    object = newObject;
-                    MemoryBarrier();
+                    atomic_thread_fence(memory_order_seq_cst);
+                    object.store(newObject, memory_order_relaxed);
                 }
             }
 
-            return const_cast<T *>(object);
+            return object.load(memory_order_relaxed);
         }
+    private:
+        static volatile atomic<T *> object;
+        static SpinLock creatorsLock;
     };
+
+    template<typename T>
+    volatile atomic<T*> Singleton<T>::object = {nullptr};;
+
+    template<typename T>
+    SpinLock Singleton<T>::creatorsLock;
 
     void SingletonThread()
     {
-        Sleep(getRandom(0, 100));
-        if (Singleton<TestObject>::getInstance()->getCreationCounter() != 1) {
+        auto o = Singleton<TestObject>::getInstance();
+        if (o->getCreationCounter() != 1) {
             std::cout << "Singleton multiple creation error!\n";
         }
     }
@@ -433,6 +441,7 @@ Sleep, etc) или сисемным вызовам (syscall);
 - должна быть поддержка рекурсивного захвата.
 */
 
+/*
 namespace CriticalSection {
     class CriticalSection {
     public:
@@ -575,6 +584,8 @@ namespace CriticalSection {
             thread.join();
     }
 }
+*/
+
 /*
 7. Read-Copy Update (RCU), упрощенный вариант.
 
@@ -607,6 +618,7 @@ newVal.b = 456;
 newVal.c = 789;
 g_Data->setNew(newVal);
 */
+
 namespace ReadCopyUpdate {
     struct Data {
         Data(int a = 0, int b = 0, int c = 0):a{ a }, b{ b}, c{ c } {}
@@ -618,7 +630,7 @@ namespace ReadCopyUpdate {
     template <class T>
     class Rcu {
     public:
-        Rcu():data{ new InternalData, new InternalData() }, writersLock{ 0 } {}
+        Rcu():data{ new InternalData, new InternalData() }{}
 
         ~Rcu() {
             delete data[0];
@@ -634,19 +646,11 @@ namespace ReadCopyUpdate {
             for (;;) {
                 InternalData * currentData = getCurrentData();
 
-                InterlockedIncrement(&currentData->readersCount);
-                if (currentData->updatingInProgress) {
-                    /*
-                     * Поток был вытеснен между получением указателя и
-                     * инкрементом readersCount, а проснулся когда писатель
-                     * начал обновлять данные
-                     */
-                    InterlockedDecrement(&currentData->readersCount);
-                    continue;
-                }
+                ++currentData->readersCount;
 
                 T value = currentData->data;
-                InterlockedDecrement(&currentData->readersCount);
+
+                --currentData->readersCount;
 
                 return value;
             }
@@ -654,25 +658,21 @@ namespace ReadCopyUpdate {
 
         void set(const T& value)
         {
-            while (InterlockedCompareExchange(&writersLock, 1, 0))
-                Sleep(20);
+            AutoSpinLock lock(writersLock);
 
             InternalData * newData = getCopy();
-            InterlockedExchange(&newData->updatingInProgress, 1);
+            newData->updatingInProgress.store(1);
 
+            AdaptiveWait wait;
             while (newData->readersCount)
-                Sleep(20);
-
-            MemoryBarrier();
+                wait();
 
             newData->data = value;
 
-            InterlockedExchange(&newData->updatingInProgress, 0);
+            newData->updatingInProgress.store(0);
 
             setCopy(getCurrentData());
             setCurrentData(newData);
-
-            InterlockedExchange(&writersLock, 0);
         }
     private:
         struct InternalData {
@@ -680,19 +680,18 @@ namespace ReadCopyUpdate {
 
             T data;
 
-            volatile LONG readersCount;
-            volatile LONG updatingInProgress;
+            atomic<long> readersCount;
+            atomic<bool> updatingInProgress;
         };
 
-       InternalData * volatile data[2];
+        InternalData * volatile data[2];
 
-       InternalData * getCurrentData() {
-           return data[0];
-       }
+        InternalData * getCurrentData() {
+            return data[0];
+        }
 
        void setCurrentData(InternalData * newData) {
            data[0] = newData;
-           MemoryBarrier();
        }
 
        InternalData * getCopy() {
@@ -701,10 +700,9 @@ namespace ReadCopyUpdate {
 
        void setCopy(volatile InternalData * newData) {
            data[1] = newData;
-           MemoryBarrier();
        }
 
-       volatile LONG writersLock;
+       SpinLock writersLock;
     };
 
     Rcu<Data> rcu;
@@ -713,7 +711,7 @@ namespace ReadCopyUpdate {
         static int a = 0;
         static int b = 0;
 
-        Sleep(getRandom(0, 1000));
+        this_thread::sleep_for(chrono::milliseconds(getRandom(0, 1000)));
         for (unsigned long long i = 0; i < 1000; ++i) {
             Data data{ --a, ++b, 0 };
             data.c = data.a + data.b;
@@ -723,7 +721,7 @@ namespace ReadCopyUpdate {
 
     void RcuReaderThread()
     {
-        Sleep(getRandom(0, 1000));
+        this_thread::sleep_for(chrono::milliseconds(getRandom(0, 1000)));
         for (unsigned long long i = 0; i < 1000; ++i) {
             Data data = rcu.get();
             if (data.a + data.b != data.c)
@@ -747,6 +745,7 @@ namespace ReadCopyUpdate {
             thread.join();
     }
 }
+
 /*
 8. Readers-Writer Lock.
 
@@ -769,6 +768,7 @@ rw.exclusiveLock();
 // Изменяем данные.
 rw.exclusiveUnlock();
 */
+#if 0
 namespace ReadersWriterLock {
     class RwLock {
     public:
@@ -913,7 +913,7 @@ namespace ReadersWriterLock {
             thread.join();
     }
 }
-
+#endif
 /*
 9. Rundown Protection.
 
@@ -983,105 +983,309 @@ void setNew(DataObject * p);
 */
 
 namespace ReferenceCounter {
-    struct DataObject {
-        volatile int data;
-
-        volatile LONG refCount;
-    };
-
-    DataObject * g_DataObject = nullptr;
-    volatile LONG acquiresCount = 0;
-
-    DataObject * acquire()
-    {
-        InterlockedIncrement(&acquiresCount);
-
-        DataObject * object = g_DataObject;
-        if (object)
-            InterlockedIncrement(&object->refCount);
-
-        InterlockedDecrement(&acquiresCount);
-        return object;
-    }
-
-    void release(DataObject * object)
-    {
-        if (!object)
-            return;
-
-        if (!InterlockedDecrement(&object->refCount))
-            delete object;
-    }
-
-    void setNew(DataObject * newObject)
-    {
-        if (newObject)
-            newObject->refCount = 1;
-
-        DataObject * oldObject = (DataObject *)InterlockedExchangePointer(
-            (volatile PVOID *)&g_DataObject, newObject);
-
-        if (!oldObject)
-            return;
-
-        if(acquiresCount) {
-            AdaptiveWait adaptiveWait;
-            while (acquiresCount)
-                adaptiveWait();
+    template<class T>
+    class DataObject {
+    public:
+        DataObject() {
+            object.store(nullptr, memory_order_relaxed);
+            acquires_count.store(0, memory_order_release);
         }
 
-        release(oldObject);
-    }
+        T * acquire() {
+            acquires_count.fetch_add(1, memory_order_acq_rel);
 
-    void ReferenceCounterThread()
-    {
-        Sleep(getRandom(0, 100));
+            T * obj = object.load(memory_order_consume);
+            if (obj)
+                obj->ref_count.fetch_add(1, memory_order_relaxed);
 
-        if (getRandom(0, 10) < 6) {
-            /* Writer*/
-            if (getRandom(0, 10) < 3) {
-                setNew(nullptr);
-            }  else {
-                DataObject * object = new DataObject();
-                object->data = getRandom(0, 500);
-                setNew(object);
-            }
+            acquires_count.fetch_sub(1, memory_order_acq_rel);
 
-        } else {
-            /* Reader */
-            DataObject * object = acquire();
-            if (!object)
+            return obj;
+        }
+
+        void release(T * obj) {
+            if (!obj)
                 return;
 
-            int data = object->data;
-            int iterationsCount = getRandom(0, 1000);
-            for (int i = 0; i < iterationsCount; ++i) {
-                if (object->data != data) {
-                    std::cout << "ReferenceCounter is broken!\n";
-                    return;
-                }
+            if (!obj->ref_count.fetch_sub(1, memory_order_relaxed))
+                delete obj;
+        }
 
-                Sleep(10);
+        void set(T * obj) {
+            obj->ref_count.store(1, memory_order_release);
+
+            T * old_obj = object.exchange(obj, memory_order_acq_rel);
+            if (!old_obj)
+                return;
+
+            AdaptiveWait wait;
+            while (acquires_count.load(memory_order_acquire)) {
+                wait();
             }
+
+            release(old_obj);
+        }
+    private:
+        atomic<T *> object;
+        atomic<long> acquires_count;
+    };
+
+    struct TestData {
+        vector<int> data;
+        int sum;
+
+        atomic<long> ref_count;
+    };
+
+    DataObject<TestData> data_object;
+
+    const int readers_iterations_count = 500;
+    const int writer_iterations_count = 150;
+
+    void reader()
+    {
+        for (auto i = 0; i < readers_iterations_count; ++i) {
+            auto object = data_object.acquire();
+
+            if (!object)
+                continue;
+
+            int sum = 0;
+            for (auto x : object->data)
+                sum += x;
+
+            if (sum != object->sum)
+                cout << "error!\n";
+
+            data_object.release(object);
+            this_thread::sleep_for(chrono::milliseconds(100));
         }
     }
 
-    void Test()
+    void writer()
     {
-        const int testThreadsCount = 10000;
-        std::cout << "ReferenceCounter test on " << testThreadsCount << " threads\n";
+        static atomic<long> filler;
 
-        std::vector<std::thread> threads;
-        for (auto i = 0; i < testThreadsCount; ++i)
-            threads.emplace_back(std::thread(ReferenceCounterThread));
+        for (auto i = 0; i < writer_iterations_count; ++i) {
+            TestData * data{new TestData};
+
+            data->sum = 0;
+            for (auto j = 0; j < 100; ++j) {
+                long x = filler.fetch_add(1);
+                data->sum += x;
+                data->data.push_back(x);
+            }
+
+            data_object.set(data);
+            this_thread::sleep_for(chrono::milliseconds(100));
+        }
+    }
+
+    void Test() {
+        std::cout << "ReferernceCounter test on " << 50 << " threads\n";
+
+        vector<thread> threads;
+
+        for (auto i = 0; i < 50; ++i)
+            threads.emplace_back(i % 3? reader : writer);
 
         for (auto& thread : threads)
             thread.join();
-
-        setNew(nullptr);
     }
 }
 
+namespace DeferredDeleteReferenceCounter {
+    template <typename T>
+    class SharedObject {
+    public:
+        SharedObject(): acquires_count{0},
+            data{nullptr},
+            deffered_destroy_list{nullptr},
+            shutdown{false},
+            deleter_thread{thread(&SharedObject::deleter, this)} {
+        }
+
+        ~SharedObject() {
+            shutdown = true;
+            deleter_thread.join();
+        }
+
+        T * acquire() {
+            ++acquires_count;
+
+            T * object = data.load();
+            if (object)
+                object->ref_count.fetch_add(1);
+
+            --acquires_count;
+
+            return object;
+        }
+
+        void release(T * object) {
+            if (!object)
+                return;
+
+            if (object->marked_for_delete.load()) {
+                object->ref_count.fetch_sub(1);
+            } else if (object->ref_count.fetch_sub(1) == 1) {
+                object->marked_for_delete.store(true);
+                add_to_deferred_destroy_list(object);
+            }
+        }
+
+        void set(T * object) {
+            if (object) {
+                object->ref_count.store(1);
+                object->marked_for_delete.store(false);
+            }
+
+            T * old_object = data.exchange(object);
+
+            release(old_object);
+        }
+    private:
+        atomic<long> acquires_count;
+        atomic<T *> data;
+
+        struct list_node {
+            list_node(T *object): object{object}, next{nullptr} {}
+
+            list_node * next;
+
+            T * object;
+        };
+
+        atomic<list_node *> deffered_destroy_list;
+
+        void add_to_deferred_destroy_list(T * object) {
+            list_node * node = new list_node(object);
+            node->next = deffered_destroy_list.load();
+            while (!deffered_destroy_list.compare_exchange_weak(node->next, node));
+        }
+
+        void destroy(list_node * head) {
+            list_node * item = head;
+            while (item) {
+                list_node * next = item->next;
+
+                if (item->object->ref_count) {
+                    add_to_deferred_destroy_list(item->object);
+                } else {
+                    delete item->object;
+                }
+
+                delete item;
+
+                item = next;
+            }
+        }
+
+        atomic<bool> shutdown;
+        void deleter() {
+            while (!shutdown) {
+                list_node * local_list = deffered_destroy_list.exchange(nullptr);
+                if (!local_list) {
+                    this_thread::sleep_for(chrono::milliseconds(10));
+                    continue;
+                }
+
+                AdaptiveWait wait(100);
+                while (acquires_count)
+                    wait();
+
+                destroy(local_list);
+            }
+
+            destroy(deffered_destroy_list.load());
+        }
+        thread deleter_thread;
+    };
+
+    static atomic<long long> live_objects_count = {0};
+
+    struct TestData {
+        TestData() {
+            ++live_objects_count;
+        }
+
+        ~TestData() {
+            --live_objects_count;
+        }
+
+        atomic<long> ref_count;
+        atomic<bool> marked_for_delete;
+
+        vector<int> data;
+        int sum;
+
+
+    };
+
+    const int readers_iterations_count = 500;
+    const int writer_iterations_count = 150;
+
+    void reader(SharedObject<TestData>& shared_object)
+    {
+        for (auto i = 0; i < readers_iterations_count; ++i) {
+            auto object = shared_object.acquire();
+
+            if (!object)
+                continue;
+
+            int sum = 0;
+            for (auto x : object->data)
+                sum += x;
+
+            if (sum != object->sum)
+                cout << "error!\n";
+
+            shared_object.release(object);
+            this_thread::sleep_for(chrono::milliseconds(getRandom(10, 50)));
+        }
+    }
+
+    void writer(SharedObject<TestData>& shared_object)
+    {
+        static atomic<long> filler;
+
+        for (auto i = 0; i < writer_iterations_count; ++i) {
+            TestData * data{new TestData};
+
+            data->sum = 0;
+            for (auto j = 0; j < 100; ++j) {
+                long x = filler.fetch_add(1);
+                data->sum += x;
+                data->data.push_back(x);
+            }
+
+            shared_object.set(data);
+            this_thread::sleep_for(chrono::milliseconds(getRandom(10, 50)));
+        }
+    }
+
+
+    int main()
+    {
+        std::cout << "ReferernceCounter test on " << 50 << " threads\n";
+        {
+            SharedObject<TestData> shared_object;
+            vector<thread> threads;
+
+            for (auto i = 0; i < 500; ++i)
+                threads.emplace_back(i % 3? reader : writer, ref(shared_object));
+
+            for (auto& thread : threads)
+                thread.join();
+
+            shared_object.set(nullptr);
+        }
+
+        cout << "live objects: " << live_objects_count.load() << "\n";
+    }
+}
+
+#if 0
 namespace ReferernceCounterDoubleWordCas {
 
 /*
@@ -1235,6 +1439,7 @@ namespace ReferernceCounterDoubleWordCas {
         set(nullptr);
     }
 }
+#endif
 
 /*
 ----------------------------------------------------------------------
@@ -1257,11 +1462,11 @@ int main()
     StateTransion::Test();
     ProducerConsumer::Test();
     ThreadSafeSingleton::Test();
-    CriticalSection::Test();
+    /*CriticalSection::Test();*/
     ReadCopyUpdate::Test();
-    ReadersWriterLock::Test();
+    /*ReadersWriterLock::Test();*/
     ReferenceCounter::Test();
-    ReferernceCounterDoubleWordCas::Test();
+    /*ReferernceCounterDoubleWordCas::Test();*/
 
     return 0;
 }
