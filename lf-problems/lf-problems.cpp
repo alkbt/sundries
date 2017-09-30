@@ -352,7 +352,7 @@ namespace ThreadSafeSingleton {
 
                 if (!object.load(memory_order_relaxed)) {
                     T * newObject = new T();
-                    atomic_thread_fence(memory_order_seq_cst);
+                    atomic_thread_fence(memory_order_release);
                     object.store(newObject, memory_order_relaxed);
                 }
             }
@@ -441,7 +441,7 @@ Sleep, etc) или сисемным вызовам (syscall);
 - должна быть поддержка рекурсивного захвата.
 */
 
-/*
+#if 0
 namespace CriticalSection {
     class CriticalSection {
     public:
@@ -584,7 +584,7 @@ namespace CriticalSection {
             thread.join();
     }
 }
-*/
+#endif
 
 /*
 7. Read-Copy Update (RCU), упрощенный вариант.
@@ -1095,29 +1095,30 @@ namespace ReferenceCounter {
 }
 
 namespace DeferredDeleteReferenceCounter {
+
     template <typename T>
     class SharedObject {
     public:
         SharedObject(): acquires_count{0},
             data{nullptr},
-            deffered_destroy_list{nullptr},
+            deferred_destroy_list{nullptr},
             shutdown{false},
             deleter_thread{thread(&SharedObject::deleter, this)} {
         }
 
         ~SharedObject() {
-            shutdown = true;
+            shutdown.store(true, memory_order_release);
             deleter_thread.join();
         }
 
         T * acquire() {
-            ++acquires_count;
+            acquires_count.fetch_add(1, memory_order_acq_rel);
 
-            T * object = data.load();
+            T * object = data.load(memory_order_consume);
             if (object)
-                object->ref_count.fetch_add(1);
+                object->ref_count.fetch_add(1, memory_order_relaxed);
 
-            --acquires_count;
+            acquires_count.fetch_sub(1, memory_order_acq_rel);
 
             return object;
         }
@@ -1126,21 +1127,21 @@ namespace DeferredDeleteReferenceCounter {
             if (!object)
                 return;
 
-            if (object->marked_for_delete.load()) {
+            if (object->marked_for_delete.load(memory_order_acquire)) {
                 object->ref_count.fetch_sub(1);
             } else if (object->ref_count.fetch_sub(1) == 1) {
-                object->marked_for_delete.store(true);
+                object->marked_for_delete.store(true, memory_order_release);
                 add_to_deferred_destroy_list(object);
             }
         }
 
         void set(T * object) {
             if (object) {
-                object->ref_count.store(1);
-                object->marked_for_delete.store(false);
+                object->ref_count.store(1, memory_order_relaxed);
+                object->marked_for_delete.store(false, memory_order_relaxed);
             }
 
-            T * old_object = data.exchange(object);
+            T * old_object = data.exchange(object, memory_order_acq_rel);
 
             release(old_object);
         }
@@ -1156,12 +1157,13 @@ namespace DeferredDeleteReferenceCounter {
             T * object;
         };
 
-        atomic<list_node *> deffered_destroy_list;
+        atomic<list_node *> deferred_destroy_list;
 
         void add_to_deferred_destroy_list(T * object) {
             list_node * node = new list_node(object);
-            node->next = deffered_destroy_list.load();
-            while (!deffered_destroy_list.compare_exchange_weak(node->next, node));
+            node->next = deferred_destroy_list.load(memory_order_acquire);
+            while (!deferred_destroy_list.compare_exchange_weak(node->next, node,
+                                                        memory_order_acq_rel));
         }
 
         void destroy(list_node * head) {
@@ -1169,7 +1171,7 @@ namespace DeferredDeleteReferenceCounter {
             while (item) {
                 list_node * next = item->next;
 
-                if (item->object->ref_count) {
+                if (item->object->ref_count.load(memory_order_acquire)) {
                     add_to_deferred_destroy_list(item->object);
                 } else {
                     delete item->object;
@@ -1184,7 +1186,8 @@ namespace DeferredDeleteReferenceCounter {
         atomic<bool> shutdown;
         void deleter() {
             while (!shutdown) {
-                list_node * local_list = deffered_destroy_list.exchange(nullptr);
+                list_node * local_list = deferred_destroy_list.exchange(nullptr,
+                                                                        memory_order_acq_rel);
                 if (!local_list) {
                     this_thread::sleep_for(chrono::milliseconds(10));
                     continue;
@@ -1197,7 +1200,7 @@ namespace DeferredDeleteReferenceCounter {
                 destroy(local_list);
             }
 
-            destroy(deffered_destroy_list.load());
+            destroy(deferred_destroy_list.load(memory_order_relaxed));
         }
         thread deleter_thread;
     };
@@ -1218,8 +1221,6 @@ namespace DeferredDeleteReferenceCounter {
 
         vector<int> data;
         int sum;
-
-
     };
 
     const int readers_iterations_count = 500;
@@ -1265,9 +1266,9 @@ namespace DeferredDeleteReferenceCounter {
     }
 
 
-    int main()
+    int Test()
     {
-        std::cout << "ReferernceCounter test on " << 50 << " threads\n";
+        std::cout << "DeferredDeleteReferenceCounter test on " << 500 << " threads\n";
         {
             SharedObject<TestData> shared_object;
             vector<thread> threads;
@@ -1466,6 +1467,7 @@ int main()
     ReadCopyUpdate::Test();
     /*ReadersWriterLock::Test();*/
     ReferenceCounter::Test();
+    DeferredDeleteReferenceCounter::Test();
     /*ReferernceCounterDoubleWordCas::Test();*/
 
     return 0;
