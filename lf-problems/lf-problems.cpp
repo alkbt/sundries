@@ -1096,128 +1096,164 @@ namespace ReferenceCounter {
 
 namespace DeferredDeleteReferenceCounter {
 
-    template <typename T>
-    class SharedObject {
+    struct SharedBase {
+        virtual ~SharedBase() {}
+
+        atomic<long> ref_count;
+        atomic<bool> marked_for_delete;
+    };
+
+    class DeferredDeleteList {
     public:
-        SharedObject(): acquires_count{0},
-            data{nullptr},
-            deferred_destroy_list{nullptr},
+        DeferredDeleteList(): acquires_count{0},
+            deferred_delete_list{nullptr},
             shutdown{false},
-            deleter_thread{thread(&SharedObject::deleter, this)} {
+            deleter_thread{thread(&DeferredDeleteList::deleter, this)} {
         }
 
-        ~SharedObject() {
-            shutdown.store(true, memory_order_release);
-            deleter_thread.join();
-        }
+        ~DeferredDeleteList();
 
-        T * acquire() {
-            acquires_count.fetch_add(1, memory_order_acq_rel);
+        void insert(SharedBase * object);
 
-            T * object = data.load(memory_order_consume);
-            if (object)
-                object->ref_count.fetch_add(1, memory_order_relaxed);
-
-            acquires_count.fetch_sub(1, memory_order_acq_rel);
-
-            return object;
-        }
-
-        void release(T * object) {
-            if (!object)
-                return;
-
-            if (object->marked_for_delete.load(memory_order_acquire)) {
-                object->ref_count.fetch_sub(1);
-            } else if (object->ref_count.fetch_sub(1) == 1) {
-                object->marked_for_delete.store(true, memory_order_release);
-                add_to_deferred_destroy_list(object);
-            }
-        }
-
-        void set(T * object) {
-            if (object) {
-                object->ref_count.store(1, memory_order_relaxed);
-                object->marked_for_delete.store(false, memory_order_relaxed);
-            }
-
-            T * old_object = data.exchange(object, memory_order_acq_rel);
-
-            release(old_object);
-        }
-    private:
         atomic<long> acquires_count;
-        atomic<T *> data;
 
+    private:
         struct list_node {
-            list_node(T *object): object{object}, next{nullptr} {}
+            list_node(SharedBase *object): object{object}, next{nullptr} {}
 
             list_node * next;
 
-            T * object;
+            SharedBase * object;
         };
 
-        atomic<list_node *> deferred_destroy_list;
-
-        void add_to_deferred_destroy_list(T * object) {
-            list_node * node = new list_node(object);
-            node->next = deferred_destroy_list.load(memory_order_acquire);
-            while (!deferred_destroy_list.compare_exchange_weak(node->next, node,
-                                                        memory_order_acq_rel));
-        }
-
-        void destroy(list_node * head) {
-            list_node * item = head;
-            while (item) {
-                list_node * next = item->next;
-
-                if (item->object->ref_count.load(memory_order_acquire)) {
-                    add_to_deferred_destroy_list(item->object);
-                } else {
-                    delete item->object;
-                }
-
-                delete item;
-
-                item = next;
-            }
-        }
-
+        atomic<list_node *> deferred_delete_list;
         atomic<bool> shutdown;
-        void deleter() {
-            while (!shutdown) {
-                list_node * local_list = deferred_destroy_list.exchange(nullptr,
-                                                                        memory_order_acq_rel);
-                if (!local_list) {
-                    this_thread::sleep_for(chrono::milliseconds(10));
-                    continue;
-                }
-
-                AdaptiveWait wait(100);
-                while (acquires_count)
-                    wait();
-
-                destroy(local_list);
-            }
-
-            destroy(deferred_destroy_list.load(memory_order_relaxed));
-        }
         thread deleter_thread;
+
+        void insert(list_node * node);
+        void delete_list(list_node * head);
+        void deleter();
     };
 
+    class SharedObject {
+    public:
+        SharedObject(): data{nullptr} {}
+
+        SharedBase * acquire();
+        void release(SharedBase * object);
+        void set(SharedBase * object);
+
+    private:
+        atomic<SharedBase *> data;
+        DeferredDeleteList deferred_delete_list;
+    };
+
+    /* Impementation */
+
+    DeferredDeleteList::~DeferredDeleteList()
+    {
+        shutdown.store(true, memory_order_release);
+        deleter_thread.join();
+    }
+
+    void DeferredDeleteList::insert(list_node * node)
+    {
+        node->next = deferred_delete_list.load(memory_order_acquire);
+        while (!deferred_delete_list.compare_exchange_weak(node->next, node,
+                                                           memory_order_acq_rel));
+    }
+
+    void DeferredDeleteList::insert(SharedBase * object)
+    {
+        insert(new list_node(object));
+    }
+
+    void DeferredDeleteList::delete_list(list_node * head)
+    {
+        list_node * item = head;
+        while (item) {
+            list_node * next = item->next;
+
+            if (item->object->ref_count.load(memory_order_acquire)) {
+                insert(item);
+            } else {
+                delete item->object;
+                delete item;
+            }
+
+            item = next;
+        }
+    }
+
+    void DeferredDeleteList::deleter()
+    {
+        while (!shutdown) {
+            list_node * local_list = deferred_delete_list.exchange(nullptr,
+                                                                   memory_order_acq_rel);
+            if (!local_list) {
+                this_thread::sleep_for(chrono::milliseconds(10));
+                continue;
+            }
+
+            AdaptiveWait wait(100);
+            while (acquires_count)
+                wait();
+
+            delete_list(local_list);
+        }
+
+        delete_list(deferred_delete_list.load(memory_order_relaxed));
+    }
+
+    SharedBase * SharedObject::acquire()
+    {
+        deferred_delete_list.acquires_count.fetch_add(1, memory_order_acq_rel);
+
+        SharedBase * object = data.load(memory_order_consume);
+        if (object)
+            object->ref_count.fetch_add(1, memory_order_relaxed);
+
+        deferred_delete_list.acquires_count.fetch_sub(1, memory_order_acq_rel);
+
+        return object;
+    }
+
+    void SharedObject::release(SharedBase * object)
+    {
+        if (!object)
+            return;
+
+        if (object->marked_for_delete.load(memory_order_acquire)) {
+            object->ref_count.fetch_sub(1);
+        } else if (object->ref_count.fetch_sub(1) == 1) {
+            object->marked_for_delete.store(true, memory_order_release);
+            deferred_delete_list.insert(object);
+        }
+    }
+
+    void SharedObject::set(SharedBase * object)
+    {
+        if (object) {
+            object->ref_count.store(1, memory_order_relaxed);
+            object->marked_for_delete.store(false, memory_order_relaxed);
+        }
+
+        SharedBase * old_object = data.exchange(object, memory_order_acq_rel);
+
+        release(old_object);
+    }
+
+    /* Tests */
     static atomic<long long> live_objects_count = {0};
 
-    struct TestData {
+    struct TestData: public SharedBase {
         TestData() {
             ++live_objects_count;
         }
 
-        ~TestData() {
+        ~TestData() override {
             --live_objects_count;
         }
-
-        atomic<long> ref_count;
-        atomic<bool> marked_for_delete;
 
         vector<int> data;
         int sum;
@@ -1226,10 +1262,10 @@ namespace DeferredDeleteReferenceCounter {
     const int readers_iterations_count = 500;
     const int writer_iterations_count = 150;
 
-    void reader(SharedObject<TestData>& shared_object)
+    void reader(SharedObject& shared_object)
     {
         for (auto i = 0; i < readers_iterations_count; ++i) {
-            auto object = shared_object.acquire();
+            TestData * object = dynamic_cast<TestData *>(shared_object.acquire());
 
             if (!object)
                 continue;
@@ -1246,7 +1282,7 @@ namespace DeferredDeleteReferenceCounter {
         }
     }
 
-    void writer(SharedObject<TestData>& shared_object)
+    void writer(SharedObject& shared_object)
     {
         static atomic<long> filler;
 
@@ -1265,12 +1301,11 @@ namespace DeferredDeleteReferenceCounter {
         }
     }
 
-
     int Test()
     {
         std::cout << "DeferredDeleteReferenceCounter test on " << 500 << " threads\n";
         {
-            SharedObject<TestData> shared_object;
+            SharedObject shared_object;
             vector<thread> threads;
 
             for (auto i = 0; i < 500; ++i)
@@ -1282,7 +1317,8 @@ namespace DeferredDeleteReferenceCounter {
             shared_object.set(nullptr);
         }
 
-        cout << "live objects: " << live_objects_count.load() << "\n";
+        if (live_objects_count.load())
+            cout << "ERROR! live objects: " << live_objects_count.load() << "\n";
     }
 }
 
