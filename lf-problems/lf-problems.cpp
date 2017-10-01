@@ -300,22 +300,21 @@ g_Data->setNew(newVal);
 
 namespace read_copy_update {
     struct Data {
-        Data(int a = 0, int b = 0, int c = 0):a{ a }, b{ b}, c{ c } {}
+        Data(int a = 0, int b = 0): a{a}, b{b}, c{a + b} {}
         int a;
         int b;
         int c;
     };
 
     Rcu<Data> rcu;
+    static atomic<int> a = {0};
+    static atomic<int> b = {0};
+
     void writer()
     {
-        static int a = 0;
-        static int b = 0;
-
-        this_thread::sleep_for(chrono::milliseconds(get_random(0, 1000)));
+        this_thread::sleep_for(chrono::milliseconds(get_random(0, 100)));
         for (unsigned long long i = 0; i < 1000; ++i) {
-            Data data{ --a, ++b, 0 };
-            data.c = data.a + data.b;
+            Data data{--a, ++b};
 
             rcu.set(data);
         }
@@ -323,7 +322,7 @@ namespace read_copy_update {
 
     void reader()
     {
-        this_thread::sleep_for(chrono::milliseconds(get_random(0, 1000)));
+        this_thread::sleep_for(chrono::milliseconds(get_random(0, 100)));
         for (unsigned long long i = 0; i < 1000; ++i) {
             Data data = rcu.get();
             if (data.a + data.b != data.c)
@@ -333,7 +332,7 @@ namespace read_copy_update {
 
     void test()
     {
-        const int testThreadsCount = 1000;
+        const int testThreadsCount = 100;
         std::cout << "ReadCopyUpdate test on " << testThreadsCount << " threads\n";
 
         std::vector<std::thread> threads;

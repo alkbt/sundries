@@ -5,11 +5,11 @@
 template <class T>
 class Rcu {
 public:
-    Rcu():data{new InternalData, new InternalData()} {}
+    Rcu() = default;
 
     ~Rcu() {
-        delete data[0];
-        delete data[1];
+        delete current_data.load();
+        delete copy_data.load();
     }
 
     Rcu(const Rcu&) = delete;
@@ -19,13 +19,15 @@ public:
 
     T get() {
         for (;;) {
-            InternalData * currentData = getCurrentData();
+            InternalData * data = current_data.load();
 
-            ++currentData->readersCount;
+            ++data->readersCount;
+            if (data->updatingInProgress)
+                continue;
 
-            T value = currentData->data;
+            T value = data->data;
 
-            --currentData->readersCount;
+            --data->readersCount;
 
             return value;
         }
@@ -35,19 +37,19 @@ public:
     {
         AutoSpinLock lock(writersLock);
 
-        InternalData * newData = getCopy();
-        newData->updatingInProgress.store(1);
+        InternalData * new_data = copy_data.load();
+        new_data->updatingInProgress.store(true);
 
         AdaptiveWait wait;
-        while (newData->readersCount)
+        while (new_data->readersCount)
             wait();
 
-        newData->data = value;
+        new_data->data = value;
 
-        newData->updatingInProgress.store(0);
+        new_data->updatingInProgress.store(false);
 
-        setCopy(getCurrentData());
-        setCurrentData(newData);
+        copy_data.store(current_data.load());
+        current_data.store(new_data);
     }
 private:
     struct InternalData {
@@ -59,23 +61,8 @@ private:
         std::atomic<bool> updatingInProgress;
     };
 
-    InternalData * volatile data[2];
-
-    InternalData * getCurrentData() {
-        return data[0];
-    }
-
-    void setCurrentData(InternalData * newData) {
-        data[0] = newData;
-    }
-
-    InternalData * getCopy() {
-        return data[1];
-    }
-
-    void setCopy(InternalData * volatile newData) {
-        data[1] = newData;
-    }
+    std::atomic<InternalData *> current_data = {new InternalData};
+    std::atomic<InternalData *> copy_data = {new InternalData};
 
     SpinLock writersLock;
 };
