@@ -56,7 +56,10 @@ void DeferredDeleteList::deleter()
         delete_list(local_list);
     }
 
-    delete_list(deferred_delete_list.load(memory_order_relaxed));
+    while (deferred_delete_list.load(memory_order_acquire)) {
+        delete_list(deferred_delete_list.exchange(nullptr));
+    }
+
 }
 
 SharedBase * SharedObject::acquire()
