@@ -547,8 +547,6 @@ namespace deferred_delete_ref_counter {
 
 int main()
 {
-    deferred_delete_ref_counter::test();
-
     state_transition::test();
     producer_consumer::test();
     thread_safe_singleton::test();
