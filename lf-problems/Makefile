@@ -6,8 +6,7 @@ OBJS = critical_section.o \
        thread_safe_singleton.o
 
 all		:	$(OBJS)
-	@echo "Building lf-problems"
-	@clang++ -pthreads -fsanitize=thread -o lf-problems $(OBJS)
+	clang++ -pthreads -fsanitize=thread -pie -o lf-problems $(OBJS)
 	@echo "Running lf-problems"
 	@./lf-problems
 
@@ -16,4 +15,4 @@ clean	:
 	rm ./lf-problems
 
 %.o : %.cpp
-	clang++ -c -g -O3 --std=c++11 $< -o $@
+	clang++ -c -g -O2 -fsanitize=thread --std=c++11 -fPIE $< -o $@
