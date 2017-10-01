@@ -1113,12 +1113,17 @@ namespace DeferredDeleteReferenceCounter {
     class DeferredDeleteList {
     public:
         DeferredDeleteList(): acquires_count{0},
-            deferred_delete_list{nullptr},
-            shutdown{false},
-            deleter_thread{thread(&DeferredDeleteList::deleter, this)} {
+                              deferred_delete_list{nullptr},
+                              shutdown{false},
+                              deleter_thread{thread(&DeferredDeleteList::deleter, this)} {
         }
 
         ~DeferredDeleteList();
+
+        DeferredDeleteList(const DeferredDeleteList&) = delete;
+        DeferredDeleteList(DeferredDeleteList&&) = delete;
+        DeferredDeleteList& operator=(const DeferredDeleteList&) = delete;
+        DeferredDeleteList& operator=(DeferredDeleteList&&) = delete;
 
         void insert(SharedBase * object);
 
@@ -1136,6 +1141,11 @@ namespace DeferredDeleteReferenceCounter {
     class SharedObject {
     public:
         SharedObject(): data{nullptr} {}
+
+        SharedObject(const SharedObject&) = delete;
+        SharedObject(SharedObject&&) = delete;
+        SharedObject& operator=(const SharedObject&) = delete;
+        SharedObject& operator=(SharedObject&&) = delete;
 
         SharedBase * acquire();
         void release(SharedBase * object);
