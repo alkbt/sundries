@@ -698,7 +698,7 @@ namespace ReadCopyUpdate {
            return data[1];
        }
 
-       void setCopy(volatile InternalData * newData) {
+       void setCopy(InternalData * volatile newData) {
            data[1] = newData;
        }
 
@@ -716,6 +716,7 @@ namespace ReadCopyUpdate {
             Data data{ --a, ++b, 0 };
             data.c = data.a + data.b;
 
+            rcu.set(data);
         }
     }
 
@@ -1506,7 +1507,7 @@ int main()
     ProducerConsumer::Test();
     ThreadSafeSingleton::Test();
     /*CriticalSection::Test();*/
-    ReadCopyUpdate::Test();
+    /*ReadCopyUpdate::Test();*/
     /*ReadersWriterLock::Test();*/
     ReferenceCounter::Test();
     DeferredDeleteReferenceCounter::Test();
