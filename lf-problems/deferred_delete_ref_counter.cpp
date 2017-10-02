@@ -61,6 +61,11 @@ void DeferredDeleteList::deleter()
     }
 }
 
+SharedObject::~SharedObject()
+{
+    set(nullptr);
+}
+
 SharedBase * SharedObject::acquire()
 {
     deferred_delete_list.acquires_count.fetch_add(1, memory_order_acq_rel);

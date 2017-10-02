@@ -43,6 +43,8 @@ class SharedObject {
 public:
     SharedObject() = default;
 
+    ~SharedObject();
+
     SharedObject(const SharedObject&) = delete;
     SharedObject(SharedObject&&) = delete;
     SharedObject& operator=(const SharedObject&) = delete;
