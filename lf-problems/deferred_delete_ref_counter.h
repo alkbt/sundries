@@ -13,7 +13,6 @@ struct SharedBase {
     SharedBase * next = {nullptr};
 
     atomic<long> ref_count = {0};
-    atomic<bool> marked_for_delete = {false};
 };
 
 class DeferredDeleteList {

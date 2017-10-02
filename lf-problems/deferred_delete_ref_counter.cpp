@@ -43,7 +43,7 @@ void DeferredDeleteList::deleter()
 {
     while (!shutdown) {
         SharedBase * local_list = deferred_delete_list.exchange(nullptr,
-                                                                memory_order_acq_rel);
+                                                        memory_order_acq_rel);
         if (!local_list) {
             this_thread::sleep_for(chrono::milliseconds(10));
             continue;
@@ -80,23 +80,18 @@ void SharedObject::release(SharedBase * object)
     if (!object)
         return;
 
-    if (object->marked_for_delete.load(memory_order_acquire)) {
-        object->ref_count.fetch_sub(1);
-    } else if (object->ref_count.fetch_sub(1) == 1) {
-        object->marked_for_delete.store(true, memory_order_release);
-        deferred_delete_list.insert(object);
-    }
+    object->ref_count.fetch_sub(1, memory_order_acq_rel);
 }
 
 void SharedObject::set(SharedBase * object)
 {
     if (object) {
-        object->ref_count.store(1, memory_order_relaxed);
-        object->marked_for_delete.store(false, memory_order_relaxed);
+        object->ref_count.store(0, memory_order_relaxed);
     }
 
     SharedBase * old_object = data.exchange(object, memory_order_acq_rel);
 
-    release(old_object);
+    if (old_object)
+        deferred_delete_list.insert(old_object);
 }
 
