@@ -35,7 +35,7 @@ private:
     atomic<bool> shutdown{false};
     thread deleter_thread{thread(&DeferredDeleteList::deleter, this)};
 
-    void delete_list(SharedBase * head);
+    bool delete_list(SharedBase * head);
     void deleter();
 };
 
