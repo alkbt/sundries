@@ -13,18 +13,19 @@ struct SharedBase {
     SharedBase * next = {nullptr};
 
     atomic<long> ref_count = {0};
+    atomic<long> shared_objects_count = {0};
 };
 
-class DeferredDeleteList {
+class DeferredDeleter {
 public:
-    DeferredDeleteList() = default;
+    DeferredDeleter() = default;
 
-    ~DeferredDeleteList();
+    ~DeferredDeleter();
 
-    DeferredDeleteList(const DeferredDeleteList&) = delete;
-    DeferredDeleteList(DeferredDeleteList&&) = delete;
-    DeferredDeleteList& operator=(const DeferredDeleteList&) = delete;
-    DeferredDeleteList& operator=(DeferredDeleteList&&) = delete;
+    DeferredDeleter(const DeferredDeleter&) = delete;
+    DeferredDeleter(DeferredDeleter&&) = delete;
+    DeferredDeleter& operator=(const DeferredDeleter&) = delete;
+    DeferredDeleter& operator=(DeferredDeleter&&) = delete;
 
     void insert(SharedBase * object);
 
@@ -33,7 +34,7 @@ public:
 private:
     atomic<SharedBase *> deferred_delete_list{nullptr};
     atomic<bool> shutdown{false};
-    thread deleter_thread{thread(&DeferredDeleteList::deleter, this)};
+    thread deleter_thread{thread(&DeferredDeleter::deleter, this)};
 
     bool delete_list(SharedBase * head);
     void deleter();
@@ -41,7 +42,9 @@ private:
 
 class SharedObject {
 public:
-    SharedObject() = default;
+    SharedObject(DeferredDeleter& deferred_deleter)
+                            :deferred_deleter{deferred_deleter} {
+    }
 
     ~SharedObject();
 
@@ -56,5 +59,25 @@ public:
 
 private:
     atomic<SharedBase *> data{nullptr};
-    DeferredDeleteList deferred_delete_list;
+    DeferredDeleter& deferred_deleter;
+};
+
+class AutoSharedObject {
+public:
+    AutoSharedObject(SharedObject& shared_object)
+            : shared_object{shared_object},
+              object{shared_object.acquire()}  {
+    }
+
+    ~AutoSharedObject() {
+        if (object)
+            shared_object.release(object);
+    }
+
+    SharedBase * get_object() {
+        return object;
+    }
+private:
+    SharedObject& shared_object;
+    SharedBase * object;
 };

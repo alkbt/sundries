@@ -4,20 +4,20 @@
 
 using namespace std;
 
-DeferredDeleteList::~DeferredDeleteList()
+DeferredDeleter::~DeferredDeleter()
 {
     shutdown.store(true, memory_order_release);
     deleter_thread.join();
 }
 
-void DeferredDeleteList::insert(SharedBase * node)
+void DeferredDeleter::insert(SharedBase * node)
 {
     node->next = deferred_delete_list.load(memory_order_acquire);
     while (!deferred_delete_list.compare_exchange_weak(node->next, node,
                                                     memory_order_acq_rel));
 }
 
-bool DeferredDeleteList::delete_list(SharedBase * head)
+bool DeferredDeleter::delete_list(SharedBase * head)
 {
     bool live_objects = false;
 
@@ -38,7 +38,7 @@ bool DeferredDeleteList::delete_list(SharedBase * head)
     return live_objects;
 }
 
-void DeferredDeleteList::deleter()
+void DeferredDeleter::deleter()
 {
     while (!shutdown) {
         SharedBase * local_list = deferred_delete_list.exchange(nullptr,
@@ -68,13 +68,13 @@ SharedObject::~SharedObject()
 
 SharedBase * SharedObject::acquire()
 {
-    deferred_delete_list.acquires_count.fetch_add(1, memory_order_acq_rel);
+    deferred_deleter.acquires_count.fetch_add(1, memory_order_acq_rel);
 
     SharedBase * object = data.load(memory_order_consume);
     if (object)
         object->ref_count.fetch_add(1, memory_order_acq_rel);
 
-    deferred_delete_list.acquires_count.fetch_sub(1, memory_order_acq_rel);
+    deferred_deleter.acquires_count.fetch_sub(1, memory_order_acq_rel);
 
     return object;
 }
@@ -90,10 +90,10 @@ void SharedObject::release(SharedBase * object)
 void SharedObject::set(SharedBase * object)
 {
     if (object)
-        object->ref_count.store(0, memory_order_relaxed);
+        ++object->shared_objects_count;
 
     SharedBase * old_object = data.exchange(object, memory_order_acq_rel);
 
-    if (old_object)
-        deferred_delete_list.insert(old_object);
+    if (old_object && !--old_object->shared_objects_count)
+        deferred_deleter.insert(old_object);
 }
