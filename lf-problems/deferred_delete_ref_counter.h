@@ -13,19 +13,19 @@ struct SharedBase {
     SharedBase * next = {nullptr};
 
     atomic<long> ref_count = {0};
-    atomic<long> shared_objects_count = {0};
+    atomic<bool> in_garbage = {false};
 };
 
-class DeferredDeleter {
+class SharedGarbageCollector {
 public:
-    DeferredDeleter() = default;
+    SharedGarbageCollector() = default;
 
-    ~DeferredDeleter();
+    ~SharedGarbageCollector();
 
-    DeferredDeleter(const DeferredDeleter&) = delete;
-    DeferredDeleter(DeferredDeleter&&) = delete;
-    DeferredDeleter& operator=(const DeferredDeleter&) = delete;
-    DeferredDeleter& operator=(DeferredDeleter&&) = delete;
+    SharedGarbageCollector(const SharedGarbageCollector&) = delete;
+    SharedGarbageCollector(SharedGarbageCollector&&) = delete;
+    SharedGarbageCollector& operator=(const SharedGarbageCollector&) = delete;
+    SharedGarbageCollector& operator=(SharedGarbageCollector&&) = delete;
 
     void insert(SharedBase * object);
 
@@ -34,7 +34,7 @@ public:
 private:
     atomic<SharedBase *> deferred_delete_list{nullptr};
     atomic<bool> shutdown{false};
-    thread deleter_thread{thread(&DeferredDeleter::deleter, this)};
+    thread deleter_thread{thread(&SharedGarbageCollector::deleter, this)};
 
     bool delete_list(SharedBase * head);
     void deleter();
@@ -42,8 +42,8 @@ private:
 
 class SharedObject {
 public:
-    SharedObject(DeferredDeleter& deferred_deleter)
-                            :deferred_deleter{deferred_deleter} {
+    SharedObject(SharedGarbageCollector& garbage_collector)
+                            :garbage_collector{garbage_collector} {
     }
 
     ~SharedObject();
@@ -55,11 +55,11 @@ public:
 
     SharedBase * acquire();
     void release(SharedBase * object);
-    void set(SharedBase * object);
+    void set(SharedBase * object, bool acquire = false);
 
 private:
     atomic<SharedBase *> data{nullptr};
-    DeferredDeleter& deferred_deleter;
+    SharedGarbageCollector& garbage_collector;
 };
 
 class AutoSharedObject {

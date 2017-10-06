@@ -527,7 +527,8 @@ namespace deferred_delete_ref_counter {
     {
         std::cout << "DeferredDeleteReferenceCounter test on " << threads_count << " threads\n";
         {
-            SharedObject shared_object;
+            SharedGarbageCollector shared_garbage_collector;
+            SharedObject shared_object(shared_garbage_collector);
             vector<thread> threads;
 
             for (auto i = 0; i < threads_count; ++i)
@@ -535,8 +536,6 @@ namespace deferred_delete_ref_counter {
 
             for (auto& thread : threads)
                 thread.join();
-
-            shared_object.set(nullptr);
         }
 
         if (live_objects_count.load())

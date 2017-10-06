@@ -4,20 +4,20 @@
 
 using namespace std;
 
-DeferredDeleter::~DeferredDeleter()
+SharedGarbageCollector::~SharedGarbageCollector()
 {
     shutdown.store(true, memory_order_release);
     deleter_thread.join();
 }
 
-void DeferredDeleter::insert(SharedBase * node)
+void SharedGarbageCollector::insert(SharedBase * node)
 {
     node->next = deferred_delete_list.load(memory_order_acquire);
     while (!deferred_delete_list.compare_exchange_weak(node->next, node,
                                                     memory_order_acq_rel));
 }
 
-bool DeferredDeleter::delete_list(SharedBase * head)
+bool SharedGarbageCollector::delete_list(SharedBase * head)
 {
     bool live_objects = false;
 
@@ -38,7 +38,7 @@ bool DeferredDeleter::delete_list(SharedBase * head)
     return live_objects;
 }
 
-void DeferredDeleter::deleter()
+void SharedGarbageCollector::deleter()
 {
     while (!shutdown) {
         SharedBase * local_list = deferred_delete_list.exchange(nullptr,
@@ -68,13 +68,13 @@ SharedObject::~SharedObject()
 
 SharedBase * SharedObject::acquire()
 {
-    deferred_deleter.acquires_count.fetch_add(1, memory_order_acq_rel);
+    garbage_collector.acquires_count.fetch_add(1, memory_order_acq_rel);
 
     SharedBase * object = data.load(memory_order_consume);
     if (object)
         object->ref_count.fetch_add(1, memory_order_acq_rel);
 
-    deferred_deleter.acquires_count.fetch_sub(1, memory_order_acq_rel);
+    garbage_collector.acquires_count.fetch_sub(1, memory_order_acq_rel);
 
     return object;
 }
@@ -87,13 +87,21 @@ void SharedObject::release(SharedBase * object)
     object->ref_count.fetch_sub(1, memory_order_acq_rel);
 }
 
-void SharedObject::set(SharedBase * object)
+void SharedObject::set(SharedBase * object, bool acquire)
 {
-    if (object)
-        ++object->shared_objects_count;
+    if (object) {
+        object->ref_count.fetch_add(1, memory_order_acq_rel);
+        if (acquire)
+            object->ref_count.fetch_add(1, memory_order_acq_rel);
+    }
 
     SharedBase * old_object = data.exchange(object, memory_order_acq_rel);
 
-    if (old_object && !--old_object->shared_objects_count)
-        deferred_deleter.insert(old_object);
+    if (old_object) {
+        bool expected = false;
+        if (old_object->in_garbage.compare_exchange_strong(expected, true))
+            garbage_collector.insert(old_object);
+
+        old_object->ref_count.fetch_sub(1, memory_order_acq_rel);
+    }
 }
