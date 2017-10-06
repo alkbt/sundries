@@ -79,20 +79,10 @@ SharedBase * SharedObject::acquire()
     return object;
 }
 
-void SharedObject::release(SharedBase * object)
-{
-    if (!object)
-        return;
-
-    object->ref_count.fetch_sub(1, memory_order_acq_rel);
-}
-
-void SharedObject::set(SharedBase * object, bool acquire)
+void SharedObject::set(SharedBase * object)
 {
     if (object) {
         object->ref_count.fetch_add(1, memory_order_acq_rel);
-        if (acquire)
-            object->ref_count.fetch_add(1, memory_order_acq_rel);
     }
 
     SharedBase * old_object = data.exchange(object, memory_order_acq_rel);

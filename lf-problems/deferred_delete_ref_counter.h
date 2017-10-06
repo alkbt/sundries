@@ -10,10 +10,28 @@ struct SharedBase {
 
     virtual ~SharedBase() {}
 
+    SharedBase(const SharedBase&) = delete;
+    SharedBase(SharedBase&&) = delete;
+
+    SharedBase& operator=(const SharedBase&) = delete;
+    SharedBase& operator=(SharedBase&&) = delete;
+
+    void acquire() {
+        ref_count.fetch_add(1, memory_order_acq_rel);
+    }
+
+    void release() {
+        ref_count.fetch_sub(1, memory_order_acq_rel);
+    }
+
+private:
     SharedBase * next = {nullptr};
 
     atomic<long> ref_count = {0};
     atomic<bool> in_garbage = {false};
+
+    friend class SharedGarbageCollector;
+    friend class SharedObject;
 };
 
 class SharedGarbageCollector {
@@ -54,30 +72,37 @@ public:
     SharedObject& operator=(SharedObject&&) = delete;
 
     SharedBase * acquire();
-    void release(SharedBase * object);
-    void set(SharedBase * object, bool acquire = false);
+    void set(SharedBase * object);
 
 private:
     atomic<SharedBase *> data{nullptr};
     SharedGarbageCollector& garbage_collector;
 };
 
+template<class T = SharedBase>
 class AutoSharedObject {
 public:
     AutoSharedObject(SharedObject& shared_object)
-            : shared_object{shared_object},
-              object{shared_object.acquire()}  {
+            : object{dynamic_cast<T*>(shared_object.acquire())}  {
+    }
+
+    AutoSharedObject(T * object): object{object} {
+        if (object)
+            object->acquire();
     }
 
     ~AutoSharedObject() {
         if (object)
-            shared_object.release(object);
+            object->release();
     }
 
-    SharedBase * get_object() {
+    T* operator->() {
+        return object;
+    }
+
+    operator T*() {
         return object;
     }
 private:
-    SharedObject& shared_object;
-    SharedBase * object;
+    T * object;
 };

@@ -484,7 +484,7 @@ namespace deferred_delete_ref_counter {
     void reader(SharedObject& shared_object)
     {
         for (auto i = 0; i < readers_iterations_count; ++i) {
-            TestData * object = dynamic_cast<TestData *>(shared_object.acquire());
+            AutoSharedObject<TestData> object(shared_object);
 
             if (!object)
                 continue;
@@ -496,7 +496,6 @@ namespace deferred_delete_ref_counter {
             if (sum != object->sum)
                 cout << "error!\n";
 
-            shared_object.release(object);
             this_thread::sleep_for(chrono::milliseconds(get_random(10, 50)));
         }
     }
@@ -506,6 +505,8 @@ namespace deferred_delete_ref_counter {
         static atomic<long> filler;
 
         for (auto i = 0; i < writer_iterations_count; ++i) {
+            this_thread::sleep_for(chrono::milliseconds(get_random(10, 50)));
+
             TestData * data{new TestData};
 
             const size_t vector_size = 100;
@@ -519,7 +520,6 @@ namespace deferred_delete_ref_counter {
             }
 
             shared_object.set(data);
-            this_thread::sleep_for(chrono::milliseconds(get_random(10, 50)));
         }
     }
 
