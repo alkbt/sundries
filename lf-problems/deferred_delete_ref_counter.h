@@ -34,36 +34,9 @@ private:
     friend class SharedObject;
 };
 
-class SharedGarbageCollector {
-public:
-    SharedGarbageCollector() = default;
-
-    ~SharedGarbageCollector();
-
-    SharedGarbageCollector(const SharedGarbageCollector&) = delete;
-    SharedGarbageCollector(SharedGarbageCollector&&) = delete;
-    SharedGarbageCollector& operator=(const SharedGarbageCollector&) = delete;
-    SharedGarbageCollector& operator=(SharedGarbageCollector&&) = delete;
-
-    void insert(SharedBase * object);
-
-    atomic<long> acquires_count{0};
-
-private:
-    atomic<SharedBase *> deferred_delete_list{nullptr};
-    atomic<bool> shutdown{false};
-    thread deleter_thread{thread(&SharedGarbageCollector::deleter, this)};
-
-    bool delete_list(SharedBase * head);
-    void deleter();
-};
-
 class SharedObject {
 public:
-    SharedObject(SharedGarbageCollector& garbage_collector)
-                            :garbage_collector{garbage_collector} {
-    }
-
+    SharedObject() = default;
     ~SharedObject();
 
     SharedObject(const SharedObject&) = delete;
@@ -76,7 +49,6 @@ public:
 
 private:
     atomic<SharedBase *> data{nullptr};
-    SharedGarbageCollector& garbage_collector;
 };
 
 template<class T = SharedBase>

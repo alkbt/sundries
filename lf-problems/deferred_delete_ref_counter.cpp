@@ -1,8 +1,32 @@
 #include "deferred_delete_ref_counter.h"
-
 #include "spin_lock.h"
+#include "thread_safe_singleton.h"
 
 using namespace std;
+
+class SharedGarbageCollector {
+public:
+    SharedGarbageCollector() = default;
+
+    ~SharedGarbageCollector();
+
+    SharedGarbageCollector(const SharedGarbageCollector&) = delete;
+    SharedGarbageCollector(SharedGarbageCollector&&) = delete;
+    SharedGarbageCollector& operator=(const SharedGarbageCollector&) = delete;
+    SharedGarbageCollector& operator=(SharedGarbageCollector&&) = delete;
+
+    void insert(SharedBase * object);
+
+    atomic<long> acquires_count{0};
+
+private:
+    atomic<SharedBase *> deferred_delete_list{nullptr};
+    atomic<bool> shutdown{false};
+    thread deleter_thread{thread(&SharedGarbageCollector::deleter, this)};
+
+    bool delete_list(SharedBase * head);
+    void deleter();
+};
 
 SharedGarbageCollector::~SharedGarbageCollector()
 {
@@ -61,6 +85,8 @@ void SharedGarbageCollector::deleter()
     }
 }
 
+SharedGarbageCollector garbage_collector;
+
 SharedObject::~SharedObject()
 {
     set(nullptr);
@@ -68,13 +94,15 @@ SharedObject::~SharedObject()
 
 SharedBase * SharedObject::acquire()
 {
-    garbage_collector.acquires_count.fetch_add(1, memory_order_acq_rel);
+    Singleton<SharedGarbageCollector>::get_instance()->acquires_count.fetch_add(
+                                                        1, memory_order_acq_rel);
 
     SharedBase * object = data.load(memory_order_consume);
     if (object)
         object->ref_count.fetch_add(1, memory_order_acq_rel);
 
-    garbage_collector.acquires_count.fetch_sub(1, memory_order_acq_rel);
+    Singleton<SharedGarbageCollector>::get_instance()->acquires_count.fetch_sub(
+                                                        1, memory_order_acq_rel);
 
     return object;
 }
