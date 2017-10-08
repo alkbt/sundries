@@ -1,6 +1,5 @@
 #include "deferred_delete_ref_counter.h"
 #include "spin_lock.h"
-#include "thread_safe_singleton.h"
 
 using namespace std;
 
@@ -94,15 +93,13 @@ SharedObject::~SharedObject()
 
 SharedBase * SharedObject::acquire()
 {
-    Singleton<SharedGarbageCollector>::get_instance()->acquires_count.fetch_add(
-                                                        1, memory_order_acq_rel);
+    garbage_collector.acquires_count.fetch_add(1, memory_order_acq_rel);
 
     SharedBase * object = data.load(memory_order_consume);
     if (object)
         object->ref_count.fetch_add(1, memory_order_acq_rel);
 
-    Singleton<SharedGarbageCollector>::get_instance()->acquires_count.fetch_sub(
-                                                        1, memory_order_acq_rel);
+    garbage_collector.acquires_count.fetch_sub(1, memory_order_acq_rel);
 
     return object;
 }

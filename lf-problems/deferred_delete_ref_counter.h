@@ -63,6 +63,12 @@ public:
             object->acquire();
     }
 
+    AutoSharedObject(const AutoSharedObject&) = delete;
+    AutoSharedObject(AutoSharedObject&&) = delete;
+
+    AutoSharedObject& operator=(const AutoSharedObject&) = delete;
+    AutoSharedObject& operator=(AutoSharedObject&&) = delete;
+
     ~AutoSharedObject() {
         if (object)
             object->release();
