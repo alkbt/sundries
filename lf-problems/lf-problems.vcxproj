@@ -149,6 +149,7 @@
     <ClInclude Include="random.h" />
     <ClInclude Include="rcu.h" />
     <ClInclude Include="rw_lock.h" />
+    <ClInclude Include="shared_object.h" />
     <ClInclude Include="state_transition.h" />
     <ClInclude Include="targetver.h" />
     <ClInclude Include="spin_lock.h" />

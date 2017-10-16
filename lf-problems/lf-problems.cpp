@@ -7,6 +7,7 @@
 #include <vector>
 #include <string>
 #include <random>
+#include <map>
 
 #include "random.h"
 #include "spin_lock.h"
@@ -17,6 +18,7 @@
 #include "rcu.h"
 #include "rw_lock.h"
 #include "thread_safe_singleton.h"
+#include "shared_object.h"
 #include "deferred_delete_ref_counter.h"
 #include "double_word_cas_ref_counter.h"
 
@@ -313,7 +315,7 @@ namespace read_copy_update {
     void writer()
     {
         this_thread::sleep_for(chrono::milliseconds(get_random(0, 100)));
-        for (unsigned long long i = 0; i < 1000; ++i) {
+        for (unsigned long long i = 0; i < 100; ++i) {
             Data data{--a, ++b};
 
             rcu.set(data);
@@ -323,7 +325,7 @@ namespace read_copy_update {
     void reader()
     {
         this_thread::sleep_for(chrono::milliseconds(get_random(0, 100)));
-        for (unsigned long long i = 0; i < 1000; ++i) {
+        for (unsigned long long i = 0; i < 100; ++i) {
             Data data = rcu.get();
             if (data.a + data.b != data.c)
                 std::cout << "Rcu is broken!\n";
@@ -460,6 +462,87 @@ void setNew(DataObject * p);
 Читатели не должны блокироваться.
 */
 
+namespace shared_object {
+    static atomic<long long> live_objects_count = {0};
+
+    struct TestData: public SharedObjectBase {
+        TestData() {
+            ++live_objects_count;
+        }
+
+        ~TestData() override {
+            --live_objects_count;
+        }
+
+        vector<int> data;
+        int sum;
+    };
+
+    const int threads_count = 500;
+    const int readers_iterations_count = 500;
+    const int writer_iterations_count = 150;
+
+    void reader(SharedObject<TestData>& shared_object)
+    {
+        for (auto i = 0; i < readers_iterations_count; ++i) {
+            this_thread::sleep_for(chrono::milliseconds(get_random(10, 50)));
+
+            AutoSharedObject<TestData> object(shared_object);
+
+            if (!object)
+                continue;
+
+            int sum = 0;
+            for (auto x : object->data)
+                sum += x;
+
+            if (sum != object->sum)
+                cout << "error!\n";
+        }
+    }
+
+    void writer(SharedObject<TestData>& shared_object)
+    {
+        static atomic<long> filler;
+
+        for (auto i = 0; i < writer_iterations_count; ++i) {
+            this_thread::sleep_for(chrono::milliseconds(get_random(10, 50)));
+
+            AutoSharedObject<TestData> data(new TestData);
+
+            const size_t vector_size = 100;
+            data->data.reserve(vector_size);
+
+            data->sum = 0;
+            for (auto j = 0; j < vector_size; ++j) {
+                const long x = filler.fetch_add(1);
+                data->sum += x;
+                data->data.push_back(x);
+            }
+
+            shared_object.set(data);
+        }
+    }
+
+    void test()
+    {
+        std::cout << "shared_object test on " << threads_count << " threads\n";
+        {
+            SharedObject<TestData> shared_object;
+            vector<thread> threads;
+
+            for (auto i = 0; i < threads_count; ++i)
+                threads.emplace_back(i % 3? reader : writer, ref(shared_object));
+
+            for (auto& thread : threads)
+                thread.join();
+        }
+
+        if (live_objects_count.load())
+            cout << "ERROR! live objects: " << live_objects_count.load() << "\n";
+    }
+}
+
 namespace deferred_delete_ref_counter {
 
     static atomic<long long> live_objects_count = {0};
@@ -514,7 +597,7 @@ namespace deferred_delete_ref_counter {
 
             data->sum = 0;
             for (auto j = 0; j < vector_size; ++j) {
-                long x = filler.fetch_add(1);
+                const long x = filler.fetch_add(1);
                 data->sum += x;
                 data->data.push_back(x);
             }
@@ -548,6 +631,7 @@ int main()
     producer_consumer::test();
     thread_safe_singleton::test();
     read_copy_update::test();
+    shared_object::test();
     deferred_delete_ref_counter::test();
 
 #if _WIN32

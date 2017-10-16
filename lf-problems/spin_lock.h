@@ -8,24 +8,41 @@
 
 class AdaptiveWait {
 public:
-    AdaptiveWait(int theresold = 50): waiting_state{0}, theresold{theresold} {}
+    AdaptiveWait(int theresold = 50, int breakdown = 0)
+            : waiting_state{0},
+              theresold{theresold},
+              breakdown{breakdown} {
+    }
 
     AdaptiveWait(const AdaptiveWait&) = delete;
     AdaptiveWait(AdaptiveWait&&) = delete;
     AdaptiveWait& operator=(const AdaptiveWait&) = delete;
     AdaptiveWait& operator=(AdaptiveWait&&) = delete;
 
-    void operator()() {
+    bool operator()() {
         if (waiting_state < theresold)
             _mm_pause();
         else
             std::this_thread::sleep_for(std::chrono::milliseconds(10));
 
         ++waiting_state;
+
+        if (breakdown && (waiting_state >= breakdown))
+            return true;
+
+        return false;
     }
+
+    void reset(int theresold = 50, int breakdown = 0) {
+        this->theresold = theresold;
+        this->breakdown = breakdown;
+        this->waiting_state = 0;
+    }
+
 private:
     int theresold;
     int waiting_state;
+    int breakdown;
 };
 
 class SpinLock {

@@ -51,6 +51,9 @@
     <ClInclude Include="double_word_cas_ref_counter.h">
       <Filter>Header Files</Filter>
     </ClInclude>
+    <ClInclude Include="shared_object.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
   </ItemGroup>
   <ItemGroup>
     <ClCompile Include="lf-problems.cpp">
