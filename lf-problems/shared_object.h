@@ -30,41 +30,12 @@ namespace shared_object {
     public:
         ~SharedObject() {
             T * old_obj_ptr = object.exchange(nullptr);
-            T * deletion_list = deletion_head.exchange(nullptr);
-
-            old_obj_ptr->next = deletion_list;
-            deletion_list = old_obj_ptr;
-
-            AdaptiveWait wait(50);
-            while (acquires_count)
-                wait();
-
-            try_delete_list(deletion_list, true);
+            try_to_delete_objects(old_obj_ptr, true);
         }
 
         void set(T * obj_ptr) {
             T * old_obj_ptr = object.exchange(obj_ptr);
-            T * deletion_list = deletion_head.exchange(nullptr);
-
-            if (!old_obj_ptr && !deletion_list)
-                return;
-
-            if (old_obj_ptr) {
-                old_obj_ptr->next = deletion_list;
-                deletion_list = old_obj_ptr;
-            }
-
-            bool delete_later = false;
-            AdaptiveWait wait(50, 50);
-            while (!delete_later && acquires_count)
-                delete_later = wait();
-
-            if (delete_later) {
-                return_deletion_list(deletion_list);
-                return;
-            }
-
-            try_delete_list(deletion_list);
+            try_to_delete_objects(old_obj_ptr);
         }
 
         T * acquire() {
@@ -80,42 +51,61 @@ namespace shared_object {
             return obj_ptr;
         }
     private:
+        using ListElement = decltype(T::next);
+
         std::atomic<T *> object{nullptr};
         std::atomic<long> acquires_count{0};
-        std::atomic<T *> deletion_head{nullptr};
+        std::atomic<ListElement> deletion_head{nullptr};
 
-        void insert_to_deletion_list(T * obj_ptr) {
-            T * head = deletion_head.load();
-            for (;;) {
-                obj_ptr->next = head;
-                if (deletion_head.compare_exchange_weak(head, obj_ptr))
-                    break;
-            }
+        void insert_to_deletion_list(ListElement obj_ptr) {
+            obj_ptr->next = deletion_head;
+            while (!deletion_head.compare_exchange_weak(obj_ptr->next,                                                      obj_ptr))
+                _mm_pause();
         }
 
-        void return_deletion_list(T * obj_ptr) {
+        void return_deletion_list(ListElement obj_ptr) {
             while (obj_ptr) {
-                T * next = static_cast<T *>(obj_ptr->next);
+                ListElement next = obj_ptr->next;
                 insert_to_deletion_list(obj_ptr);
                 obj_ptr = next;
             }
         }
 
-        void try_delete_list(T * obj_ptr, bool wait_forever = false) {
-            while (obj_ptr) {
-                T * next = static_cast<T *>(obj_ptr->next);
+        void try_to_delete_objects(T * obj_ptr, bool wait_forever = false) {
+            ListElement deletion_list = deletion_head.exchange(nullptr);
 
-                bool delete_later = false;
-                AdaptiveWait wait(50, wait_forever? 0 : 100);
-                while (obj_ptr->ref_count)
+            if (!obj_ptr && !deletion_list)
+                return;
+
+            if (obj_ptr) {
+                obj_ptr->next = deletion_list;
+                deletion_list = obj_ptr;
+            }
+
+            bool delete_later = false;
+            AdaptiveWait wait(15, wait_forever? 0 : 20);
+            while (!delete_later && acquires_count)
+                delete_later = wait();
+
+            if (delete_later) {
+                return_deletion_list(deletion_list);
+                return;
+            }
+
+            while (deletion_list) {
+                ListElement next = deletion_list->next;
+
+                delete_later = false;
+                wait.reset(15, wait_forever? 0 : 20);
+                while (!delete_later && deletion_list->ref_count)
                     delete_later = wait();
 
                 if (delete_later)
-                    insert_to_deletion_list(obj_ptr);
+                    insert_to_deletion_list(deletion_list);
                 else
-                    delete obj_ptr;
+                    delete deletion_list;
 
-                obj_ptr = next;
+                deletion_list = next;
             }
         }
     };
