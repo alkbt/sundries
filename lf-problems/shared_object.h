@@ -59,7 +59,7 @@ namespace shared_object {
 
         void insert_to_deletion_list(ListElement obj_ptr) {
             obj_ptr->next = deletion_head;
-            while (!deletion_head.compare_exchange_weak(obj_ptr->next,                                                      obj_ptr))
+            while (!deletion_head.compare_exchange_weak(obj_ptr->next, obj_ptr))
                 _mm_pause();
         }
 
